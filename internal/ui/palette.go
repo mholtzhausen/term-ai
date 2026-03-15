@@ -3,6 +3,8 @@ package ui
 import (
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
@@ -125,12 +127,27 @@ const (
 	PaletteModels
 	PaletteProviders
 	PaletteConversations
+	PaletteThemes
 )
 
 type commandPalette struct {
 	list     list.Model
 	mode     PaletteMode
 	selected string
+}
+
+// fgAnsi returns a 24-bit ANSI foreground sequence for a #RRGGBB lipgloss color.
+// Using \x1b[39m (fg-only reset) after dot glyphs instead of \x1b[0m (full reset)
+// ensures any background set by PaginationStyle survives the entire row.
+func fgAnsi(c lipgloss.Color) string {
+	hex := strings.TrimPrefix(string(c), "#")
+	if len(hex) != 6 {
+		return ""
+	}
+	r, _ := strconv.ParseInt(hex[0:2], 16, 64)
+	g, _ := strconv.ParseInt(hex[2:4], 16, 64)
+	b, _ := strconv.ParseInt(hex[4:6], 16, 64)
+	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
 }
 
 func newCommandPalette(title string, items []list.Item) commandPalette {
@@ -146,7 +163,13 @@ func newCommandPalette(title string, items []list.Item) commandPalette {
 
 	l.Styles.FilterPrompt = lipgloss.NewStyle().Foreground(ColorAccent)
 	l.Styles.FilterCursor = lipgloss.NewStyle().Foreground(ColorAccent)
-	
+
+	// Set dots directly on the paginator (Styles fields are only copied at New() time).
+	// Use \x1b[39m (fg-only reset) instead of \x1b[0m (full reset) so the background
+	// color applied by PaginationStyle is not cancelled mid-row.
+	l.Paginator.ActiveDot   = fgAnsi(ColorAccent) + "●" + "\x1b[39m"
+	l.Paginator.InactiveDot = fgAnsi(ColorMuted)  + "○" + "\x1b[39m"
+
 	l.SetShowHelp(false)
 
 	return commandPalette{

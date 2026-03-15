@@ -19,7 +19,7 @@ func Connect() (*Database, error) {
 		return nil, err
 	}
 
-	dbPath := filepath.Join(home, ".term-ai", "mhai.db")
+	dbPath := filepath.Join(home, ".term-ai", "term-ai.db")
 	dbDir := filepath.Dir(dbPath)
 
 	if _, err := os.Stat(dbDir); os.IsNotExist(err) {

@@ -66,7 +66,11 @@ type model struct {
 	modalWidth     int
 	modalHeight    int
 	currentConversation *ai.Conversation
-	
+
+	// Theme
+	theme         Theme
+	previousTheme Theme
+
 	// Wizard context
 	wizardMode   string // "add" or "edit"
 	showWizard   bool
@@ -82,7 +86,19 @@ type chunkMsg string
 type modelsLoadedMsg []string
 
 func LaunchInteractive(p *persona.Persona, provider *config.Provider, initialModelName string) error {
+	activeTheme := DefaultTheme
+	if d, dbErr := db.Connect(); dbErr == nil {
+		if name, cfgErr := config.GetConfig(d, "active_theme"); cfgErr == nil {
+			if t, ok := ThemesByName[name]; ok {
+				activeTheme = t
+			}
+		}
+		d.Conn.Close()
+	}
+	ApplyTheme(activeTheme)
+
 	m := initialModel(p, provider, initialModelName)
+	m.theme = activeTheme
 	p_tea := tea.NewProgram(&m, tea.WithAltScreen())
 	m.program = p_tea
 	_, err := p_tea.Run()
@@ -172,6 +188,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var lCmd tea.Cmd
 		m.palette.list, lCmd = m.palette.list.Update(msg)
 		tiCmd = lCmd
+
+		// Live preview: apply theme as user navigates the theme picker
+		if m.palette.mode == PaletteThemes {
+			if hovered, ok := m.palette.list.SelectedItem().(item); ok {
+				if t, ok := hovered.meta["theme"].(Theme); ok {
+					ApplyTheme(t)
+					m.theme = t
+				}
+			}
+		}
 	} else if m.showWizard {
 		m.textarea, tiCmd = m.textarea.Update(msg)
 	} else {
@@ -211,6 +237,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEsc:
 			if m.showPalette {
 				if m.palette.mode != PaletteMain {
+					if m.palette.mode == PaletteThemes {
+						ApplyTheme(m.previousTheme)
+						m.theme = m.previousTheme
+					}
 					m.openMainPalette()
 					return m, nil
 				}
@@ -238,7 +268,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.palette = newCommandPalette("Models", items)
 		m.palette.mode = PaletteModels
-		m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
+		m.applyPaletteSize()
 		return m, nil
 
 	case responseMsg:
@@ -287,25 +317,36 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tiCmd, vpCmd)
 }
 
+// applyPaletteSize resizes the palette list and sets the pagination centering
+// style in one call. Must be called after m.modalWidth/modalHeight are set.
+func (m *model) applyPaletteSize() {
+	w := m.modalWidth - 4
+	m.palette.list.SetSize(w, m.modalHeight-4)
+	m.palette.list.Styles.PaginationStyle = lipgloss.NewStyle().
+		Width(w).
+		Align(lipgloss.Center).
+		Background(ColorBg)
+}
+
 func (m *model) sizeApp() {
 	m.width = m.terminalWidth - 2
 	m.height = m.terminalHeight - 2
 
 	inputHeight := 3
-	
+
 	headerH := 4
 	footerH := inputHeight + 4 // Adjust for footer border + hint text
-	
+
 	m.viewport.Width = m.width
 	m.viewport.Height = m.height - headerH - footerH
-	
+
 	m.textarea.SetWidth(m.width)
 	m.textarea.SetHeight(inputHeight)
 
 	m.modalWidth = int(float64(m.width) * 0.6)
 	m.modalHeight = int(float64(m.height) * 0.6)
 	if m.showPalette {
-		m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
+		m.applyPaletteSize()
 		if m.palette.mode == PaletteProviders {
 			m.palette.list.AdditionalShortHelpKeys = func() []key.Binding {
 				return []key.Binding{
@@ -321,11 +362,12 @@ func (m *model) openMainPalette() {
 	items := []list.Item{
 		item{title: "Select Provider", category: "Suggested", shortcut: "ctrl+p"},
 		item{title: "Select Model", category: "Suggested", shortcut: "ctrl+m"},
+		item{title: "Change Theme", category: "Appearance"},
 		item{title: "Recent Conversations", category: "Session", shortcut: "ctrl+r"},
 	}
 	m.palette = newCommandPalette("Commands", items)
 	m.palette.mode = PaletteMain
-	m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
+	m.applyPaletteSize()
 	m.showPalette = true
 }
 
@@ -342,6 +384,8 @@ func (m *model) handlePaletteSelection() (tea.Model, tea.Cmd) {
 			return m.openModelsPalette()
 		case "Select Provider":
 			return m.openProvidersPalette()
+		case "Change Theme":
+			return m.openThemesPalette()
 		case "Recent Conversations":
 			return m.openConversationsPalette()
 		}
@@ -374,6 +418,20 @@ func (m *model) handlePaletteSelection() (tea.Model, tea.Cmd) {
 		}
 		
 		m.updateViewport()
+		return m, nil
+	case PaletteThemes:
+		t, ok := i.meta["theme"].(Theme)
+		if !ok {
+			return m, nil
+		}
+		m.theme = t
+		ApplyTheme(t)
+		d, _ := db.Connect()
+		if d != nil {
+			config.SetConfig(d, "active_theme", t.Name)
+			d.Conn.Close()
+		}
+		m.showPalette = false
 		return m, nil
 	case PaletteProviders:
 		if i.title == "Add New Provider..." {
@@ -464,7 +522,7 @@ func (m *model) handleWizardNext() (tea.Model, tea.Cmd) {
 func (m *model) openModelsPalette() (tea.Model, tea.Cmd) {
 	m.palette = newCommandPalette("Models", []list.Item{item{title: "Loading...", category: "Models"}})
 	m.palette.mode = PaletteModels
-	m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
+	m.applyPaletteSize()
 
 	return m, func() tea.Msg {
 		models, err := ai.ListModels(m.provider.ApiUrl, m.provider.ApiKey)
@@ -487,7 +545,7 @@ func (m *model) openProvidersPalette() (tea.Model, tea.Cmd) {
 	items = append(items, item{title: "Add New Provider...", category: "Actions", shortcut: "ctrl+n"})
 	m.palette = newCommandPalette("Providers", items)
 	m.palette.mode = PaletteProviders
-	m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
+	m.applyPaletteSize()
 	m.palette.list.AdditionalFullHelpKeys = func() []key.Binding {
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
@@ -519,7 +577,11 @@ func (m *model) updateViewport() {
 		b.WriteString(m.currentOut.String())
 	}
 	
-	rendered, _ := glamour.Render(b.String(), "dark")
+	glamourStyle := m.theme.GlamourStyle
+	if glamourStyle == "" {
+		glamourStyle = "dark"
+	}
+	rendered, _ := glamour.Render(b.String(), glamourStyle)
 	m.viewport.SetContent(rendered)
 	m.viewport.GotoBottom()
 }
@@ -650,6 +712,27 @@ func (m *model) View() string {
 
 	return ui
 }
+func (m *model) openThemesPalette() (tea.Model, tea.Cmd) {
+	m.previousTheme = m.theme
+	var items []list.Item
+	for _, t := range BuiltInThemes {
+		title := t.Name
+		if t.Name == m.theme.Name {
+			title += " ✓"
+		}
+		items = append(items, item{
+			title:    title,
+			category: "Themes",
+			meta:     map[string]interface{}{"theme": t},
+		})
+	}
+	m.palette = newCommandPalette("Themes", items)
+	m.palette.mode = PaletteThemes
+	m.applyPaletteSize()
+	m.showPalette = true
+	return m, nil
+}
+
 func (m *model) openConversationsPalette() (tea.Model, tea.Cmd) {
 	d, _ := db.Connect()
 	if d == nil {
@@ -670,6 +753,6 @@ func (m *model) openConversationsPalette() (tea.Model, tea.Cmd) {
 	
 	m.palette = newCommandPalette("History", items)
 	m.palette.mode = PaletteConversations
-	m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
+	m.applyPaletteSize()
 	return m, nil
 }
