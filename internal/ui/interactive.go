@@ -23,27 +23,27 @@ import (
 var (
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#5F5FD7")).
+			Foreground(lipgloss.Color("#101010")).
+			Background(ColorAccent).
 			Padding(0, 1).
 			MarginRight(1)
 
 	headerStyle = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder(), false, false, true, false).
-			BorderForeground(lipgloss.Color("#3C3C3C")).
+			BorderForeground(ColorBorder).
 			MarginBottom(1)
 
 	infoStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#8787AF"))
+			Foreground(ColorMuted)
 
 	footerStyle = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder(), true, false, false, false).
-			BorderForeground(lipgloss.Color("#3C3C3C")).
+			BorderForeground(ColorBorder).
 			PaddingTop(1)
 
 	appStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#5F5FD7"))
+			BorderForeground(ColorBorder)
 )
 
 type model struct {
@@ -102,10 +102,10 @@ func initialModel(p *persona.Persona, provider *config.Provider, initialModelNam
 	ta.ShowLineNumbers = false
 	ta.KeyMap.InsertNewline.SetEnabled(false)
 
-	l := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
+	l := list.New([]list.Item{}, itemDelegate{}, 0, 0)
+	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
-	l.Styles.Title = lipgloss.NewStyle().Bold(true).Padding(0, 1).Background(lipgloss.Color("#5F5FD7")).Foreground(lipgloss.Color("#FFFFFF"))
 	l.SetShowHelp(false)
 
 	vp := viewport.New(30, 10)
@@ -234,9 +234,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modelsLoadedMsg:
 		var items []list.Item
 		for _, mName := range msg {
-			items = append(items, item{title: mName, desc: "AI Model"})
+			items = append(items, item{title: mName, category: "Models", shortcut: "enter"})
 		}
-		m.palette = newCommandPalette("Select Model", items)
+		m.palette = newCommandPalette("Models", items)
 		m.palette.mode = PaletteModels
 		m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
 		return m, nil
@@ -319,11 +319,11 @@ func (m *model) sizeApp() {
 
 func (m *model) openMainPalette() {
 	items := []list.Item{
-		item{title: "Select Provider", desc: "Switch between configured AI backends"},
-		item{title: "Select Model", desc: "Change the active LLM model"},
-		item{title: "Recent Conversations", desc: "Resume a previous chat session"},
+		item{title: "Select Provider", category: "Suggested", shortcut: "ctrl+p"},
+		item{title: "Select Model", category: "Suggested", shortcut: "ctrl+m"},
+		item{title: "Recent Conversations", category: "Session", shortcut: "ctrl+r"},
 	}
-	m.palette = newCommandPalette("Command Palette", items)
+	m.palette = newCommandPalette("Commands", items)
 	m.palette.mode = PaletteMain
 	m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
 	m.showPalette = true
@@ -462,7 +462,7 @@ func (m *model) handleWizardNext() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) openModelsPalette() (tea.Model, tea.Cmd) {
-	m.palette = newCommandPalette("Loading Models...", []list.Item{item{title: "Loading...", desc: "Fetching from API"}})
+	m.palette = newCommandPalette("Models", []list.Item{item{title: "Loading...", category: "Models"}})
 	m.palette.mode = PaletteModels
 	m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
 
@@ -482,10 +482,10 @@ func (m *model) openProvidersPalette() (tea.Model, tea.Cmd) {
 
 	var items []list.Item
 	for _, p := range providers {
-		items = append(items, item{title: p.Name, desc: p.ApiUrl, hasActions: true})
+		items = append(items, item{title: p.Name, category: "Providers", hasActions: true, shortcut: "ctrl+x p"})
 	}
-	items = append(items, item{title: "Add New Provider...", desc: "Setup a new AI backend"})
-	m.palette = newCommandPalette("Select Provider", items)
+	items = append(items, item{title: "Add New Provider...", category: "Actions", shortcut: "ctrl+n"})
+	m.palette = newCommandPalette("Providers", items)
 	m.palette.mode = PaletteProviders
 	m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
 	m.palette.list.AdditionalFullHelpKeys = func() []key.Binding {
@@ -594,21 +594,32 @@ func (m *model) View() string {
 	)
 
 	if m.showPalette {
+		// Custom header from the image
+		headerLeft := lipgloss.NewStyle().Foreground(ColorText).Bold(true).Render("Commands")
+		headerRight := lipgloss.NewStyle().Foreground(ColorMuted).Render("esc")
+		header := lipgloss.JoinHorizontal(lipgloss.Top,
+			headerLeft,
+			lipgloss.PlaceHorizontal(m.modalWidth-lipgloss.Width(headerLeft)-lipgloss.Width(headerRight)-4, lipgloss.Right, headerRight),
+		)
+
 		// Render Modal centered
 		modal := lipgloss.NewStyle().
-			Border(lipgloss.DoubleBorder()).
-			BorderForeground(lipgloss.Color("#5F5FD7")).
-			Padding(1).
+			Background(ColorBg).
+			Padding(1, 2).
 			Width(m.modalWidth).
 			Height(m.modalHeight).
-			Render(m.palette.list.View())
+			Render(lipgloss.JoinVertical(lipgloss.Left,
+				header,
+				"",
+				m.palette.list.View(),
+			))
 
-		// Center the modal over the UI
+		// Center the modal over the UI with a subtle backdrop
 		ui = lipgloss.Place(m.terminalWidth, m.terminalHeight,
 			lipgloss.Center, lipgloss.Center,
 			modal,
-			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceForeground(lipgloss.Color("#282828")),
+			lipgloss.WithWhitespaceChars("█"),
+			lipgloss.WithWhitespaceForeground(lipgloss.Color("#050505")),
 		)
 	}
 
@@ -627,11 +638,11 @@ func (m *model) View() string {
 
 		wizard := lipgloss.NewStyle().
 			Border(lipgloss.DoubleBorder()).
-			BorderForeground(lipgloss.Color("#FFAF00")).
+			BorderForeground(ColorAccent).
 			Padding(1).
 			Width(m.modalWidth).
 			Render(lipgloss.JoinVertical(lipgloss.Left,
-				titleStyle.Background(lipgloss.Color("#FFAF00")).Render(wizardTitle),
+				titleStyle.Background(ColorAccent).Render(wizardTitle),
 				infoStyle.Render(stepTitle),
 				"",
 				m.textarea.View(),
@@ -642,8 +653,8 @@ func (m *model) View() string {
 		ui = lipgloss.Place(m.terminalWidth, m.terminalHeight,
 			lipgloss.Center, lipgloss.Center,
 			wizard,
-			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceForeground(lipgloss.Color("#282828")),
+			lipgloss.WithWhitespaceChars("░"),
+			lipgloss.WithWhitespaceForeground(lipgloss.Color("#121212")),
 		)
 	}
 
@@ -660,13 +671,14 @@ func (m *model) openConversationsPalette() (tea.Model, tea.Cmd) {
 	var items []list.Item
 	for _, c := range convs {
 		items = append(items, item{
-			title: c.Title,
-			desc:  fmt.Sprintf("%s | %s | %s", c.Platform, c.UpdatedAt.Format("Jan 02 15:04"), c.ModelName),
-			meta:  map[string]interface{}{"conv": &c},
+			title:    c.Title,
+			category: "Conversations",
+			shortcut: c.UpdatedAt.Format("Jan 02"),
+			meta:     map[string]interface{}{"conv": &c},
 		})
 	}
 	
-	m.palette = newCommandPalette("Recent Conversations", items)
+	m.palette = newCommandPalette("History", items)
 	m.palette.mode = PaletteConversations
 	m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
 	return m, nil
