@@ -614,13 +614,8 @@ func (m *model) View() string {
 				m.palette.list.View(),
 			))
 
-		// Center the modal over the UI with a subtle backdrop
-		ui = lipgloss.Place(m.terminalWidth, m.terminalHeight,
-			lipgloss.Center, lipgloss.Center,
-			modal,
-			lipgloss.WithWhitespaceChars("█"),
-			lipgloss.WithWhitespaceForeground(lipgloss.Color("#050505")),
-		)
+		// Center the modal over the UI with a dimmed background.
+		ui = placeOverlayCenter(ui, modal, m.terminalWidth, m.terminalHeight)
 	}
 
 	if m.showWizard {
@@ -650,12 +645,7 @@ func (m *model) View() string {
 				infoStyle.Render("Press Enter to continue, Esc to cancel"),
 			))
 		
-		ui = lipgloss.Place(m.terminalWidth, m.terminalHeight,
-			lipgloss.Center, lipgloss.Center,
-			wizard,
-			lipgloss.WithWhitespaceChars("░"),
-			lipgloss.WithWhitespaceForeground(lipgloss.Color("#121212")),
-		)
+		ui = placeOverlayCenter(ui, wizard, m.terminalWidth, m.terminalHeight)
 	}
 
 	return ui
