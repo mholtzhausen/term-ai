@@ -21,7 +21,7 @@ func SetProvider(d *db.Database, name, key, url string) error {
 }
 
 func ListProviders(d *db.Database) ([]Provider, error) {
-	rows, err := d.Conn.Query("SELECT name, api_key, api_url FROM providers")
+	rows, err := d.Conn.Query("SELECT name, api_key, api_url FROM providers ORDER BY name ASC")
 	if err != nil {
 		return nil, err
 	}
@@ -58,4 +58,20 @@ func GetProvider(d *db.Database, name string) (*Provider, error) {
 	}
 	p.ApiKey = key
 	return &p, nil
+}
+
+func DeleteProvider(d *db.Database, name string) error {
+	_, err := d.Conn.Exec("DELETE FROM providers WHERE name = ?", name)
+	return err
+}
+
+func SetConfig(d *db.Database, key, value string) error {
+	_, err := d.Conn.Exec("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", key, value)
+	return err
+}
+
+func GetConfig(d *db.Database, key string) (string, error) {
+	var value string
+	err := d.Conn.QueryRow("SELECT value FROM config WHERE key = ?", key).Scan(&value)
+	return value, err
 }

@@ -56,6 +56,20 @@ func (db *Database) InitSchema() error {
 			model TEXT,
 			FOREIGN KEY (provider_id) REFERENCES providers(id)
 		);`,
+		`CREATE TABLE IF NOT EXISTS config (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS conversations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			title TEXT NOT NULL,
+			history TEXT NOT NULL,
+			platform TEXT NOT NULL,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			provider_name TEXT,
+			model_name TEXT,
+			persona_name TEXT
+		);`,
 	}
 
 	for _, q := range queries {

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -64,8 +65,10 @@ type model struct {
 	showPalette    bool
 	modalWidth     int
 	modalHeight    int
+	currentConversation *ai.Conversation
 	
-	// Wizard
+	// Wizard context
+	wizardMode   string // "add" or "edit"
 	showWizard   bool
 	wizardStep   int
 	wizardName   string
@@ -78,15 +81,15 @@ type errMsg error
 type chunkMsg string
 type modelsLoadedMsg []string
 
-func LaunchInteractive(p *persona.Persona, provider *config.Provider) error {
-	m := initialModel(p, provider)
+func LaunchInteractive(p *persona.Persona, provider *config.Provider, initialModelName string) error {
+	m := initialModel(p, provider, initialModelName)
 	p_tea := tea.NewProgram(&m, tea.WithAltScreen())
 	m.program = p_tea
 	_, err := p_tea.Run()
 	return err
 }
 
-func initialModel(p *persona.Persona, provider *config.Provider) model {
+func initialModel(p *persona.Persona, provider *config.Provider, initialModelName string) model {
 	ta := textarea.New()
 	ta.Placeholder = "Type your message here..."
 	ta.Focus()
@@ -113,7 +116,7 @@ func initialModel(p *persona.Persona, provider *config.Provider) model {
 		viewport: vp,
 		persona:  p,
 		provider: provider,
-		selectedModel: "gpt-4",
+		selectedModel: initialModelName,
 		history:  []ai.Message{{Role: "system", Content: p.SystemPrompt}},
 	}
 	m.palette.list = l
@@ -131,6 +134,41 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 
 	if m.showPalette {
+		// Handle custom keys BEFORE list update to prevent double-processing or state shifts
+		if kmsg, ok := msg.(tea.KeyMsg); ok && m.palette.mode == PaletteProviders {
+			// Don't trigger actions if typing in filter
+			if m.palette.list.FilterState() != list.Filtering {
+				switch kmsg.String() {
+				case "d":
+					// DELETE
+					i, ok := m.palette.list.SelectedItem().(item)
+					if ok && i.title != "Add New Provider..." {
+						d, _ := db.Connect()
+						if d != nil {
+							config.DeleteProvider(d, i.title)
+							d.Conn.Close()
+						}
+						m.openProvidersPalette()
+						return m, nil
+					}
+				case "e":
+					// EDIT
+					i, ok := m.palette.list.SelectedItem().(item)
+					if ok && i.title != "Add New Provider..." {
+						d, _ := db.Connect()
+						if d != nil {
+							prov, err := config.GetProvider(d, i.title)
+							d.Conn.Close()
+							if err == nil {
+								m.showPalette = false
+								return m.startEditWizard(prov)
+							}
+						}
+					}
+				}
+			}
+		}
+
 		var lCmd tea.Cmd
 		m.palette.list, lCmd = m.palette.list.Update(msg)
 		tiCmd = lCmd
@@ -207,6 +245,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.history = append(m.history, ai.Message{Role: "assistant", Content: string(msg)})
 		m.loading = false
 		m.currentOut.Reset()
+		
+		// Save conversation
+		d, _ := db.Connect()
+		if d != nil {
+			if m.currentConversation == nil {
+				title := "TUI Conversation"
+				if len(m.history) > 1 {
+					title = strings.TrimSpace(m.history[1].Content)
+					if len(title) > 30 {
+						title = title[:27] + "..."
+					}
+				}
+				m.currentConversation = &ai.Conversation{
+					Title:        title,
+					Platform:     "tui",
+					ProviderName: m.provider.Name,
+					ModelName:    m.selectedModel,
+					PersonaName:  m.persona.Name,
+				}
+			}
+			m.currentConversation.History = m.history
+			ai.SaveConversation(d, m.currentConversation)
+			d.Conn.Close()
+		}
+
 		m.updateViewport()
 		return m, nil
 
@@ -228,10 +291,7 @@ func (m *model) sizeApp() {
 	m.width = m.terminalWidth - 2
 	m.height = m.terminalHeight - 2
 
-	inputHeight := int(float64(m.height) * 0.3)
-	if inputHeight < 3 {
-		inputHeight = 3
-	}
+	inputHeight := 3
 	
 	headerH := 4
 	footerH := inputHeight + 4 // Adjust for footer border + hint text
@@ -246,13 +306,22 @@ func (m *model) sizeApp() {
 	m.modalHeight = int(float64(m.height) * 0.6)
 	if m.showPalette {
 		m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
+		if m.palette.mode == PaletteProviders {
+			m.palette.list.AdditionalShortHelpKeys = func() []key.Binding {
+				return []key.Binding{
+					key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
+					key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
+				}
+			}
+		}
 	}
 }
 
 func (m *model) openMainPalette() {
 	items := []list.Item{
-		item{title: "Select Model", desc: "Change the active LLM model"},
 		item{title: "Select Provider", desc: "Switch between configured AI backends"},
+		item{title: "Select Model", desc: "Change the active LLM model"},
+		item{title: "Recent Conversations", desc: "Resume a previous chat session"},
 	}
 	m.palette = newCommandPalette("Command Palette", items)
 	m.palette.mode = PaletteMain
@@ -273,11 +342,37 @@ func (m *model) handlePaletteSelection() (tea.Model, tea.Cmd) {
 			return m.openModelsPalette()
 		case "Select Provider":
 			return m.openProvidersPalette()
+		case "Recent Conversations":
+			return m.openConversationsPalette()
 		}
+	case PaletteConversations:
+		m.currentConversation = i.meta["conv"].(*ai.Conversation)
+		m.history = m.currentConversation.History
+		m.selectedModel = m.currentConversation.ModelName
+		// Re-fetch provider if needed
+		d, _ := db.Connect()
+		if d != nil {
+			p, err := config.GetProvider(d, m.currentConversation.ProviderName)
+			if err == nil {
+				m.provider = p
+			}
+			d.Conn.Close()
+		}
+		m.showPalette = false
+		m.updateViewport()
+		return m, nil
 	case PaletteModels:
 		m.selectedModel = i.title
 		m.history = append(m.history, ai.Message{Role: "system", Content: fmt.Sprintf("Switched to model: %s", i.title)})
 		m.showPalette = false
+		
+		// Persist change
+		d, _ := db.Connect()
+		if d != nil {
+			config.SetConfig(d, "active_model", i.title)
+			d.Conn.Close()
+		}
+		
 		m.updateViewport()
 		return m, nil
 	case PaletteProviders:
@@ -291,19 +386,34 @@ func (m *model) handlePaletteSelection() (tea.Model, tea.Cmd) {
 		if err == nil {
 			m.provider = p
 			m.history = append(m.history, ai.Message{Role: "system", Content: fmt.Sprintf("Switched to provider: %s", i.title)})
+			
+			// Persist change
+			config.SetConfig(d, "active_provider", i.title)
 		}
-		m.showPalette = false
 		m.updateViewport()
-		return m, nil
+		return m.openModelsPalette()
 	}
 	return m, nil
 }
 
 func (m *model) startWizard() (tea.Model, tea.Cmd) {
 	m.showWizard = true
+	m.wizardMode = "add"
 	m.wizardStep = 1
 	m.textarea.Reset()
 	m.textarea.Placeholder = "Enter provider name (e.g. anthropic)..."
+	m.textarea.Focus()
+	return m, nil
+}
+
+func (m *model) startEditWizard(p *config.Provider) (tea.Model, tea.Cmd) {
+	m.showWizard = true
+	m.wizardMode = "edit"
+	m.wizardStep = 2 // Skip name in edit mode
+	m.wizardName = p.Name
+	m.textarea.Reset()
+	m.textarea.SetValue(p.ApiKey)
+	m.textarea.Placeholder = "Enter new API Key..."
 	m.textarea.Focus()
 	return m, nil
 }
@@ -341,7 +451,11 @@ func (m *model) handleWizardNext() (tea.Model, tea.Cmd) {
 		m.showWizard = false
 		m.textarea.Reset()
 		m.textarea.Placeholder = "Type your message here..."
-		m.history = append(m.history, ai.Message{Role: "system", Content: fmt.Sprintf("Provider %s added successfully.", m.wizardName)})
+		msg := "added"
+		if m.wizardMode == "edit" {
+			msg = "updated"
+		}
+		m.history = append(m.history, ai.Message{Role: "system", Content: fmt.Sprintf("Provider %s %s successfully.", m.wizardName, msg)})
 		m.updateViewport()
 	}
 	return m, nil
@@ -368,12 +482,18 @@ func (m *model) openProvidersPalette() (tea.Model, tea.Cmd) {
 
 	var items []list.Item
 	for _, p := range providers {
-		items = append(items, item{title: p.Name, desc: p.ApiUrl})
+		items = append(items, item{title: p.Name, desc: p.ApiUrl, hasActions: true})
 	}
 	items = append(items, item{title: "Add New Provider...", desc: "Setup a new AI backend"})
 	m.palette = newCommandPalette("Select Provider", items)
 	m.palette.mode = PaletteProviders
 	m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
+	m.palette.list.AdditionalFullHelpKeys = func() []key.Binding {
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
+			key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
+		}
+	}
 	return m, nil
 }
 
@@ -500,13 +620,18 @@ func (m *model) View() string {
 		case 3: stepTitle = "3/3: API URL"
 		}
 
+		wizardTitle := "Add Provider Wizard"
+		if m.wizardMode == "edit" {
+			wizardTitle = "Edit Provider Wizard"
+		}
+
 		wizard := lipgloss.NewStyle().
 			Border(lipgloss.DoubleBorder()).
 			BorderForeground(lipgloss.Color("#FFAF00")).
 			Padding(1).
 			Width(m.modalWidth).
 			Render(lipgloss.JoinVertical(lipgloss.Left,
-				titleStyle.Background(lipgloss.Color("#FFAF00")).Render("Add Provider Wizard"),
+				titleStyle.Background(lipgloss.Color("#FFAF00")).Render(wizardTitle),
 				infoStyle.Render(stepTitle),
 				"",
 				m.textarea.View(),
@@ -523,4 +648,26 @@ func (m *model) View() string {
 	}
 
 	return ui
+}
+func (m *model) openConversationsPalette() (tea.Model, tea.Cmd) {
+	d, _ := db.Connect()
+	if d == nil {
+		return m, nil
+	}
+	defer d.Conn.Close()
+	convs, _ := ai.ListConversations(d)
+
+	var items []list.Item
+	for _, c := range convs {
+		items = append(items, item{
+			title: c.Title,
+			desc:  fmt.Sprintf("%s | %s | %s", c.Platform, c.UpdatedAt.Format("Jan 02 15:04"), c.ModelName),
+			meta:  map[string]interface{}{"conv": &c},
+		})
+	}
+	
+	m.palette = newCommandPalette("Recent Conversations", items)
+	m.palette.mode = PaletteConversations
+	m.palette.list.SetSize(m.modalWidth-4, m.modalHeight-4)
+	return m, nil
 }

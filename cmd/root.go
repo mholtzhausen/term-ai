@@ -5,12 +5,13 @@ import (
 	"os"
 	"strings"
 
+	"time"
+
 	"github.com/mhai-org/mhai/internal/ai"
 	"github.com/mhai-org/mhai/internal/config"
 	"github.com/mhai-org/mhai/internal/db"
 	"github.com/mhai-org/mhai/internal/persona"
 	"github.com/mhai-org/mhai/internal/ui"
-	"github.com/mhai-org/mhai/internal/utils"
 	"github.com/spf13/cobra"
 	"github.com/charmbracelet/glamour"
 	"golang.org/x/term"
@@ -62,39 +63,118 @@ It supports both an interactive TUI mode and a direct output mode.`,
 			}
 		}
 
-		// Use the first available provider as default
-		providers, err := config.ListProviders(d)
-		if err != nil || len(providers) == 0 {
-			fmt.Println("No providers configured. Please use 'ai config set-provider' first.")
-			return
+		// Load stored config or default
+		providerName, _ := config.GetConfig(d, "active_provider")
+		modelName, _ := config.GetConfig(d, "active_model")
+		if modelName == "" {
+			modelName = "gpt-4"
 		}
-		provider := providers[0]
+
+		var provider *config.Provider
+		if providerName != "" {
+			p, err := config.GetProvider(d, providerName)
+			if err == nil {
+				provider = p
+			}
+		}
+
+		if provider == nil {
+			providers, err := config.ListProviders(d)
+			if err != nil || len(providers) == 0 {
+				fmt.Println("No providers configured. Please use 'ai config set-provider' first.")
+				return
+			}
+			provider = &providers[0]
+			// Persist this as the default if it's the first time
+			config.SetConfig(d, "active_provider", provider.Name)
+		}
 
 		if promptFlag != "" {
 			// Direct Mode
 			var fullResponse strings.Builder
-			
-			// If it's a terminal, we might want to show streaming raw, then re-render bits
-			// Or just stream raw and leave it if we want to keep it simple.
-			// But PRD says "formatted with glamour".
-			
 			isTerminal := term.IsTerminal(int(os.Stdout.Fd()))
 
-			err := ai.StreamChat(provider.ApiUrl, provider.ApiKey, "gpt-4", p.SystemPrompt, promptFlag, &utils.WriterWrapper{Builder: &fullResponse, Silent: !isTerminal})
-			if err != nil {
-				fmt.Printf("\nError: %v\n", err)
-			}
-			
 			if isTerminal {
-				fmt.Println("\n---")
+				// Resolve the conversation state before starting the UI program,
+				// so we can pass the resume message as initial state (avoids deadlock
+				// from calling prog.Send before prog.Run).
+				var lastConv *ai.Conversation
+				resumeMsg := ""
+				{
+					dbConn, _ := db.Connect()
+					if dbConn != nil {
+						lastConv, _ = ai.GetRecentConversation(dbConn, "cli")
+						dbConn.Conn.Close()
+					}
+				}
+
+				messages := []ai.Message{{Role: "system", Content: p.SystemPrompt}}
+				if lastConv != nil && time.Since(lastConv.UpdatedAt) < 5*time.Minute {
+					messages = lastConv.History
+					resumeMsg = fmt.Sprintf("Resuming recent conversation from %s...", lastConv.UpdatedAt.Format("15:04"))
+				} else {
+					lastConv = nil // Start fresh
+				}
+				messages = append(messages, ai.Message{Role: "user", Content: promptFlag})
+
+				prog, tokenChan, doneChan := ui.RunStatusProgram(resumeMsg)
+
+				go func() {
+					if _, err := prog.Run(); err != nil {
+						fmt.Fprintf(os.Stderr, "Error UI: %v\n", err)
+					}
+				}()
+
+				writer := &ui.TokenCounterWriter{
+					Writer:    &fullResponse,
+					TokenChan: tokenChan,
+				}
+
+				err := ai.StreamChatWithHistory(provider.ApiUrl, provider.ApiKey, modelName, messages, writer)
+				doneChan <- true
+				time.Sleep(50 * time.Millisecond)
+
+				if err != nil {
+					fmt.Printf("\nError: %v\n", err)
+				} else {
+					// Save/Update
+					d, _ := db.Connect()
+					if d != nil {
+						messages = append(messages, ai.Message{Role: "assistant", Content: fullResponse.String()})
+						if lastConv != nil {
+							lastConv.History = messages
+							ai.SaveConversation(d, lastConv)
+						} else {
+							title := promptFlag
+							if len(title) > 30 {
+								title = title[:27] + "..."
+							}
+							ai.SaveConversation(d, &ai.Conversation{
+								Title:        title,
+								History:      messages,
+								Platform:     "cli",
+								ProviderName: provider.Name,
+								ModelName:    modelName,
+								PersonaName:  p.Name,
+							})
+						}
+						d.Conn.Close()
+					}
+				}
+
 				out, _ := glamour.Render(fullResponse.String(), "dark")
 				fmt.Print(out)
 			} else {
+				// Non-terminal: just one-off as before
+				err := ai.StreamChat(provider.ApiUrl, provider.ApiKey, modelName, p.SystemPrompt, promptFlag, &fullResponse)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				}
 				fmt.Print(fullResponse.String())
 			}
 		} else {
 			// Interactive Mode
-			if err := ui.LaunchInteractive(p, &provider); err != nil {
+			if err := ui.LaunchInteractive(p, provider, modelName); err != nil {
 				fmt.Printf("Interactive session error: %v\n", err)
 			}
 		}

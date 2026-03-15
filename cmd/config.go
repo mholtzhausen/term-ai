@@ -79,10 +79,32 @@ var listProvidersCmd = &cobra.Command{
 	},
 }
 
+var deleteProviderCmd = &cobra.Command{
+	Use:   "delete-provider [name]",
+	Short: "Delete a provider",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		name := args[0]
+		d, err := db.Connect()
+		if err != nil {
+			fmt.Printf("Error connecting to database: %v\n", err)
+			return
+		}
+		defer d.Conn.Close()
+
+		if err := config.DeleteProvider(d, name); err != nil {
+			fmt.Printf("Error deleting provider: %v\n", err)
+			return
+		}
+		fmt.Printf("Provider '%s' deleted.\n", name)
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(configCmd)
 	configCmd.AddCommand(setProviderCmd)
 	configCmd.AddCommand(listProvidersCmd)
+	configCmd.AddCommand(deleteProviderCmd)
 
 	setProviderCmd.Flags().StringVar(&providerKey, "key", "", "API_KEY for the provider")
 	setProviderCmd.Flags().StringVar(&providerUrl, "url", "", "ENDPOINT_URL for the provider")
