@@ -1,87 +1,68 @@
-# AI Coding Agent Guidelines
+# MHAI — AI Coding Agent Guidelines
 
-## Repository Overview
+**Module:** `github.com/mhai-org/mhai` | **Binary:** `ai` | **Go:** 1.25.6
 
-This is a Go-based CLI application called MHAI (Modular Hybrid AI) that provides an interface for interacting with various AI providers. The codebase follows standard Go conventions with a modular structure.
+MHAI is a Go CLI/TUI tool for interacting with OpenAI-compatible AI providers. SQLite stores conversations, providers, and personas locally at `~/.mhai/mhai.db`.
 
-## Build, Lint, and Test Commands
+## Build and Test
 
-### Build Commands
 ```bash
-# Build the binary to build/bin
-make build
+make build          # → build/bin/ai
+make clean          # rm -rf build/
+make install        # sudo ln -sf to /usr/local/bin/ai
+make uninstall      # sudo rm from /usr/local/bin/ai
 
-# Clean build artifacts
-make clean
-
-# Install the binary (requires sudo)
-make install
-
-# Uninstall the binary (requires sudo)
-make uninstall
-
-# Show help
-make help
+go test ./...               # run all tests (none exist yet)
+go test ./... -cover -race  # with coverage and race detector
+go fmt ./...                # format
+go vet ./...                # suspicious constructs
 ```
 
-### Testing Commands
-```bash
-# Run all tests
-go test ./...
+> There are currently **no test files** in the repo. When adding tests, use table-driven patterns and mock external dependencies (DB, API).
 
-# Run tests with coverage
-go test ./... -cover
+## Architecture
 
-# Run a specific test package
-go test ./internal/db
+Three execution paths in `cmd/root.go`:
 
-# Run a specific test function
-go test ./internal/db -run TestFunctionName
+1. **Interactive TUI** (`ai` with no args) → `ui.LaunchInteractive()` — full-screen Bubble Tea app
+2. **Direct CLI** (`ai "prompt"`) → `ai.StreamChatWithHistory()` — streams response to stdout; renders with glamour
+3. **Auto-resume** — if a `cli`-platform conversation is <5 min old, it is automatically continued
 
-# Run tests with verbose output
-go test ./... -v
+**Component boundaries:**
 
-# Run race detector
-go test ./... -race
-```
+| Package | Responsibility |
+|---------|---------------|
+| `cmd/` | Cobra CLI commands; wires internal packages together |
+| `internal/ai/` | OpenAI-compatible HTTP client (SSE streaming), conversation CRUD |
+| `internal/config/` | Provider storage with encrypted API keys; active provider/model config keys |
+| `internal/db/` | SQLite connection + schema init (4 tables) |
+| `internal/persona/` | Persona CRUD; default persona is `"You are a helpful assistant."` |
+| `internal/security/` | AES-256-CFB encrypt/decrypt for API keys |
+| `internal/ui/` | Bubble Tea TUI (`interactive.go`), direct-mode status bar (`direct.go`), command palette (`palette.go`) |
+| `internal/utils/` | `writer.go` — dual `io.Writer` for token counting |
 
-### Linting and Formatting
-```bash
-# Format code (if no specific linter is configured)
-go fmt ./...
+**DB schema:** `providers`, `personas`, `config`, `conversations`
+- `conversations.history` is a JSON-encoded `[]ai.Message`
+- `conversations.platform` is `"cli"` or `"tui"`
+- API keys in `providers` are AES-encrypted before storage
 
-# Vet for suspicious constructs
-go vet ./...
+**TUI key bindings:** `Ctrl+P` — command palette | `Enter` — send | `Esc` — close modal
 
-# Static analysis
-staticcheck ./...  # if installed
+## Key Files
 
-# Security checks
-gosec ./...  # if installed
-```
+- `cmd/root.go` — three-way dispatch; persona `@name` resolution; auto-resume logic
+- `internal/ai/client.go` — SSE streaming; 60-second request timeout; models endpoint derived from chat URL
+- `internal/ai/conversation.go` — time parsing handles 3 formats (SQLite datetime, RFC3339, RFC3339Z)
+- `internal/security/encryption.go` — **hardcoded master key** (known issue; see Security below)
+- `internal/ui/interactive.go` — 750+ line Bubble Tea model; provider wizard is a 3-step modal
 
-## Code Style Guidelines
+## Code Style
 
-### File Organization
-- Each package should have a clear, single responsibility
-- Group related functionality in internal/ packages
-- Main package only contains application entrypoint
-- cmd/ package contains command-line interface logic
-
-### Import Organization
-1. Standard library imports (alphabetical)
-2. Blank line
-3. External imports (alphabetical by host)
-4. Blank line
-5. Local/project imports (alphabetical)
-
-Example:
+### Imports (three groups, alphabetical within each)
 ```go
 import (
     "database/sql"
     "fmt"
-    "os"
-    "path/filepath"
 
     _ "github.com/glebarez/go-sqlite"
 
@@ -90,90 +71,39 @@ import (
 )
 ```
 
-### Naming Conventions
-- Use mixedCaps for variables, functions, constants, and types
-- Package names should be lowercase, single words
-- Exported names start with uppercase letter
-- Interface names ending in -er when they have one method (e.g., Reader, Writer)
-- Struct fields use mixedCaps
-- Constants use mixedCaps or ALL_CAPS for truly constant values
-- Error variables should be named err or descriptive names like validationErr
-- Context parameters should be named ctx
+### Error handling
+- Return errors early; wrap with `fmt.Errorf("context: %w", err)` when adding context
+- Don't both log and return the same error — choose one
+- Use sentinel errors for expected conditions
 
-### Error Handling
-- Always check errors returned from functions
-- Handle errors at the appropriate level (don't just ignore)
-- Return errors early when they prevent normal function execution
-- Wrap errors with fmt.Errorf("%w", err) when adding context
-- Use sentinel errors for expected error conditions
-- Log errors appropriately (typically at the boundary where they're handled)
-- Don't log and return the same error (choose one)
+### Naming
+- `mixedCaps` everywhere; package names lowercase single words
+- Error vars named `err` or descriptive (e.g., `validationErr`); context params named `ctx`
+- Single-method interfaces end in `-er` (e.g., `Writer`)
 
-Example from codebase:
-```go
-if err := db.Ping(); err != nil {
-    return nil, err
-}
+### Patterns
+- Parameterized SQL everywhere — never string-concatenate queries
+- `filepath.Join` for all paths; `os.MkdirAll` with `0755` for dirs
+- Defer cleanup immediately after acquiring resources
+- Chat messages use `INSERT OR REPLACE` via conversation ID
 
-// Later in the same function:
-return &Database{Conn: db}, nil
-```
+## Pitfalls
 
-### Structs and Interfaces
-- Use struct tags for serialization/deserialization when needed
-- Keep interfaces small and focused
-- Prefer composition over inheritance
-- Initialize structs using composite literals
-- Don't expose internal state unnecessarily
+- **Hardcoded encryption key**: `internal/security/encryption.go` uses a hardcoded 32-byte `masterKey`. Moving it to an env var or keyring would be a breaking change for existing DBs.
+- **No tests**: All `go test` commands will succeed vacuously. Don't assume test infrastructure exists when writing new code.
+- **Model URL derivation**: `ListModels` strips `/chat/completions` to build the `/models` URL — non-standard provider URLs may break this.
+- **Conversation time parsing**: Three date formats are tried in sequence; adding a new DB source must match one of them.
+- **TUI is stateful and large**: `internal/ui/interactive.go` has a large `model` struct with 10+ fields. Read it carefully before adding TUI features.
+- **Binary is named `ai`**: The installed binary clashes with any existing `ai` command on `$PATH`.
 
-### Control Flow
-- Use early returns to reduce nesting
-- Keep functions focused and reasonably sized
-- Use blank lines to separate logical sections within functions
-- Defer cleanup operations immediately after acquiring resources
+## Security
 
-### Comments
-- Comment exported functions, types, and constants
-- Use full sentences in comments
-- Comment why, not what (unless the what is non-obvious)
-- Avoid commenting bad code - rewrite it instead
-- TODO comments should include relevant context
+- **Never hardcode new secrets** — the existing master key is a known technical debt, don't add more
+- All SQL queries must use parameterized statements (`$1` / `?` placeholders)
+- API keys are encrypted at rest via `security.Encrypt()` before any DB write
+- Validate user input at command boundaries before passing to internal packages
 
-### Specific Patterns Observed in Codebase
-- Database connections use sql.Open with proper error handling
-- File paths constructed using filepath.Join
-- Directory creation with os.MkdirAll and proper permissions
-- SQL queries use parameterized statements to prevent injection
-- Encryption uses proper IV generation and secure modes
-- Context is used appropriately for cancellation (in newer code)
+## Version Control
 
-### Testing Guidelines
-- Table-driven tests for functions with multiple input/output cases
-- Test both positive and negative cases
-- Mock external dependencies when appropriate
-- Focus on behavior, not implementation details
-- Keep tests focused and independent
-- Use descriptive test names that explain what is being tested
-- Avoid testing private functions directly; test through public interface
-
-### Security Considerations
-- Never hardcode secrets or keys
-- Use environment variables or secure vaults for credentials
-- Encrypt sensitive data at rest (as seen in security/ package)
-- Use parameterized queries to prevent SQL injection
-- Validate and sanitize user input
-- Use appropriate cryptographic primitives and modes
-
-## Additional Notes
-
-### Version Control
-- Write clear, descriptive commit messages
-- Keep commits focused on a single change
-- Reference issues in commit messages when applicable
-- Follow conventional commits format when possible
-
-### Documentation
-- Godoc comments for all exported entities
-- Keep documentation updated with code changes
-- Examples in documentation should be compilable
-- README should contain setup and usage instructions
+- Conventional Commits format: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`
+- Keep commits focused on a single change; reference issues when applicable
