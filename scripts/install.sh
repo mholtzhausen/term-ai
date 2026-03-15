@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# MHAI Interactive Installation Script
-# This script installs MHAI by cloning the repository, building the Go binary,
+# term-ai Interactive Installation Script
+# This script installs term-ai by cloning the repository, building the Go binary,
 # and moving it to /usr/local/bin.
 
 set -e
@@ -32,7 +32,7 @@ confirm() {
 }
 
 echo -e "${CYAN}--------------------------------------------------${NC}"
-echo -e "${BLUE}        MHAI - Modular Hybrid AI CLI/TUI          ${NC}"
+echo -e "${BLUE}        term-ai - Modular Hybrid AI CLI/TUI          ${NC}"
 echo -e "${CYAN}--------------------------------------------------${NC}"
 echo -e "Disclaimer: This software was 99% coded by AI. Use at own risk.\n"
 
@@ -53,11 +53,11 @@ fi
 echo -e "${GREEN}Check passed!${NC} (go, git, make found)\n"
 
 # 2. Source Selection
-INSTALL_TMP="/tmp/mhai-install-$(date +%s)"
+INSTALL_TMP="/tmp/term-ai-install-$(date +%s)"
 repo_url="https://github.com/mholtzhausen/term-ai.git"
 
-if [ -f "go.mod" ] && grep -q "github.com/mhai-org/mhai" go.mod; then
-    echo -e "${BLUE}==>${NC} Detected MHAI source directory at: ${CYAN}$(pwd)${NC}"
+if [ -f "go.mod" ] && grep -q "github.com/mhai-org/term-ai" go.mod; then
+    echo -e "${BLUE}==>${NC} Detected term-ai source directory at: ${CYAN}$(pwd)${NC}"
     if confirm "Build and install from current directory?"; then
         REPO_DIR="."
     else
@@ -65,7 +65,7 @@ if [ -f "go.mod" ] && grep -q "github.com/mhai-org/mhai" go.mod; then
         exit 0
     fi
 else
-    echo -e "${BLUE}==>${NC} No local source detected. MHAI will be cloned to a temporary directory."
+    echo -e "${BLUE}==>${NC} No local source detected. term-ai will be cloned to a temporary directory."
     if confirm "Clone repository from ${CYAN}$repo_url${NC}?"; then
         echo -e "${BLUE}==>${NC} Cloning..."
         git clone "$repo_url" "$INSTALL_TMP"

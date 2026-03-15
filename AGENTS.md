@@ -1,8 +1,8 @@
-# MHAI — AI Coding Agent Guidelines
+# term-ai — AI Coding Agent Guidelines
 
-**Module:** `github.com/mhai-org/mhai` | **Binary:** `ai` | **Go:** 1.25.6
+**Module:** `github.com/mhai-org/term-ai` | **Binary:** `ai` | **Go:** 1.25.6
 
-MHAI is a Go CLI/TUI tool for interacting with OpenAI-compatible AI providers. SQLite stores conversations, providers, and personas locally at `~/.mhai/mhai.db`.
+term-ai is a Go CLI/TUI tool for interacting with OpenAI-compatible AI providers. SQLite stores conversations, providers, and personas locally at `~/.term-ai/term-ai.db`.
 
 ## Build and Test
 
@@ -66,8 +66,8 @@ import (
 
     _ "github.com/glebarez/go-sqlite"
 
-    "github.com/mhai-org/mhai/internal/db"
-    "github.com/mhai-org/mhai/internal/security"
+    "github.com/mhai-org/term-ai/internal/db"
+    "github.com/mhai-org/term-ai/internal/security"
 )
 ```
 

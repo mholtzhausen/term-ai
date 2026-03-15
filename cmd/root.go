@@ -7,11 +7,11 @@ import (
 
 	"time"
 
-	"github.com/mhai-org/mhai/internal/ai"
-	"github.com/mhai-org/mhai/internal/config"
-	"github.com/mhai-org/mhai/internal/db"
-	"github.com/mhai-org/mhai/internal/persona"
-	"github.com/mhai-org/mhai/internal/ui"
+	"github.com/mhai-org/term-ai/internal/ai"
+	"github.com/mhai-org/term-ai/internal/config"
+	"github.com/mhai-org/term-ai/internal/db"
+	"github.com/mhai-org/term-ai/internal/persona"
+	"github.com/mhai-org/term-ai/internal/ui"
 	"github.com/spf13/cobra"
 	"github.com/charmbracelet/glamour"
 	"golang.org/x/term"
@@ -21,8 +21,8 @@ var promptFlag string
 
 var rootCmd = &cobra.Command{
 	Use:   "ai [persona]",
-	Short: "MHAI - minimalist Golang-based CLI tool for AI interaction",
-	Long: `MHAI is a beautiful, interactive CLI tool for interacting with multi-modal AI personas.
+	Short: "term-ai - minimalist Golang-based CLI tool for AI interaction",
+	Long: `term-ai is a beautiful, interactive CLI tool for interacting with multi-modal AI personas.
 It supports both an interactive TUI mode and a direct output mode.`,
 	Args: cobra.ArbitraryArgs,
 	Run: func(cmd *cobra.Command, args []string) {

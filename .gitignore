@@ -27,5 +27,5 @@ ai
 # OS
 .DS_Store
 
-# MHAI local database (optional, usually you want to exclude local data)
-# .mhai/
+# term-ai local database (optional, usually you want to exclude local data)
+# .term-ai/

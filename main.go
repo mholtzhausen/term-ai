@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mhai-org/mhai/cmd"
+	"github.com/mhai-org/term-ai/cmd"
 )
 
 func main() {

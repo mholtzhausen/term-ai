@@ -3,8 +3,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/mhai-org/mhai/internal/db"
-	"github.com/mhai-org/mhai/internal/persona"
+	"github.com/mhai-org/term-ai/internal/db"
+	"github.com/mhai-org/term-ai/internal/persona"
 	"github.com/spf13/cobra"
 )
 

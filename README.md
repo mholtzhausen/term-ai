@@ -1,6 +1,6 @@
-# MHAI (Modular Hybrid AI)
+# term-ai (Modular Hybrid AI)
 
-MHAI is a minimalist, beautiful, and powerful Golang-based CLI/TUI tool designed for rich interaction with various AI providers (Anthropic, OpenAI, etc.). It prioritizes speed, aesthetics, and a modular architecture.
+term-ai is a minimalist, beautiful, and powerful Golang-based CLI/TUI tool designed for rich interaction with various AI providers (Anthropic, OpenAI, etc.). It prioritizes speed, aesthetics, and a modular architecture.
 
 > [!CAUTION]
 > **DISCLAIMER:** This project was coded **99% by AI** (Antigravity). Use this software at your own risk. The authors are not responsible for any data loss, API costs, or unexpected behavior.
@@ -20,7 +20,7 @@ MHAI is a minimalist, beautiful, and powerful Golang-based CLI/TUI tool designed
 
 ### Quick Install (Linux)
 
-You can install MHAI directly using the following command:
+You can install term-ai directly using the following command:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mholtzhausen/term-ai/main/scripts/install.sh | sh

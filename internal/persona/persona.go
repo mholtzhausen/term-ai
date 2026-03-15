@@ -1,7 +1,7 @@
 package persona
 
 import (
-	"github.com/mhai-org/mhai/internal/db"
+	"github.com/mhai-org/term-ai/internal/db"
 )
 
 type Persona struct {

@@ -1,4 +1,4 @@
-# MHAI Makefile
+# term-ai Makefile
 
 BINARY_NAME=ai
 BUILD_DIR=build/bin
@@ -10,7 +10,7 @@ all: build
 
 ## build: Build the binary to build/bin
 build:
-	@echo "Building MHAI..."
+	@echo "Building term-ai..."
 	@mkdir -p $(BUILD_DIR)
 	@go build -o $(BUILD_DIR)/$(BINARY_NAME) main.go
 	@echo "Build complete: $(BUILD_DIR)/$(BINARY_NAME)"
@@ -23,13 +23,13 @@ clean:
 
 ## install: Install the binary by creating a symlink in /usr/local/bin (requires sudo)
 install: build
-	@echo "Installing MHAI to $(INSTALL_PATH)..."
+	@echo "Installing term-ai to $(INSTALL_PATH)..."
 	@sudo ln -sf $(PWD)/$(BUILD_DIR)/$(BINARY_NAME) $(INSTALL_PATH)
 	@echo "Installation complete. You can now run '$(BINARY_NAME)' from anywhere."
 
 ## uninstall: Remove the symlink from /usr/local/bin (requires sudo)
 uninstall:
-	@echo "Uninstalling MHAI..."
+	@echo "Uninstalling term-ai..."
 	@sudo rm -f $(INSTALL_PATH)
 	@echo "Uninstalled."
 

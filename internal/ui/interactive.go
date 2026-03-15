@@ -13,10 +13,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mhai-org/mhai/internal/ai"
-	"github.com/mhai-org/mhai/internal/config"
-	"github.com/mhai-org/mhai/internal/db"
-	"github.com/mhai-org/mhai/internal/persona"
+	"github.com/mhai-org/term-ai/internal/ai"
+	"github.com/mhai-org/term-ai/internal/config"
+	"github.com/mhai-org/term-ai/internal/db"
+	"github.com/mhai-org/term-ai/internal/persona"
 )
 
 // Styles
@@ -109,7 +109,7 @@ func initialModel(p *persona.Persona, provider *config.Provider, initialModelNam
 	l.SetShowHelp(false)
 
 	vp := viewport.New(30, 10)
-	vp.SetContent("Welcome to MHAI. How can I help you today?")
+	vp.SetContent("Welcome to term-ai. How can I help you today?")
 
 	m := model{
 		textarea: ta,
@@ -560,7 +560,7 @@ func (m *model) View() string {
 	t := time.Now()
 	
 	leftHeader := lipgloss.JoinVertical(lipgloss.Left,
-		titleStyle.Render("MHAI"),
+		titleStyle.Render("term-ai"),
 		infoStyle.Render(fmt.Sprintf("📂 %s", cwd)),
 	)
 	// Right side of header
