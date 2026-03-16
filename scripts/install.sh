@@ -57,15 +57,6 @@ esac
 ASSET_NAME="${BINARY_NAME}-${OS_KEY}-${ARCH_KEY}"
 echo -e "${BLUE}==>${NC} Detected environment: ${CYAN}${OS_KEY}/${ARCH_KEY}${NC}"
 
-# ── Asset existence check ─────────────────────────────────────────────────────
-ASSET_API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${LATEST_TAG}"
-ASSET_EXISTS=$(${API_GET} "$ASSET_API_URL" | grep '"name": *"${ASSET_NAME}"')
-if [ -z "$ASSET_EXISTS" ]; then
-    echo -e "${RED}Error:${NC} Release asset '${ASSET_NAME}' not found for tag '${LATEST_TAG}'."
-    echo -e "Please check https://github.com/${GITHUB_REPO}/releases for available assets or build from source."
-    exit 1
-fi
-
 # ── 3. Check for curl or wget ─────────────────────────────────────────────────
 if command -v curl &>/dev/null; then
     DOWNLOAD="curl -fsSL"
@@ -87,6 +78,15 @@ if [ -z "$LATEST_TAG" ]; then
 fi
 
 echo -e "${BLUE}==>${NC} Latest release: ${CYAN}${LATEST_TAG}${NC}"
+
+# ── Asset existence check ─────────────────────────────────────────────────────
+ASSET_API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${LATEST_TAG}"
+ASSET_EXISTS=$(${API_GET} "$ASSET_API_URL" | grep "\"name\": *\"${ASSET_NAME}\"")
+if [ -z "$ASSET_EXISTS" ]; then
+    echo -e "${RED}Error:${NC} Release asset '${ASSET_NAME}' not found for tag '${LATEST_TAG}'."
+    echo -e "Please check https://github.com/${GITHUB_REPO}/releases for available assets or build from source."
+    exit 1
+fi
 
 DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${LATEST_TAG}/${ASSET_NAME}"
 echo -e "${BLUE}==>${NC} Asset URL: ${CYAN}${DOWNLOAD_URL}${NC}"
