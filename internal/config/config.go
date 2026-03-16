@@ -1,8 +1,8 @@
 package config
 
 import (
-	"github.com/mhai-org/mhai/internal/db"
-	"github.com/mhai-org/mhai/internal/security"
+	"github.com/mhai-org/term-ai/internal/db"
+	"github.com/mhai-org/term-ai/internal/security"
 )
 
 type Provider struct {

@@ -1,6 +1,6 @@
-# MHAI (Modular Hybrid AI)
+# term-ai (Modular Hybrid AI)
 
-MHAI is a minimalist, beautiful, and powerful Golang-based CLI/TUI tool designed for rich interaction with various AI providers (Anthropic, OpenAI, etc.). It prioritizes speed, aesthetics, and a modular architecture.
+term-ai is a minimalist, beautiful, and powerful Golang-based CLI/TUI tool designed for rich interaction with various AI providers (Anthropic, OpenAI, etc.). It prioritizes speed, aesthetics, and a modular architecture.
 
 > [!CAUTION]
 > **DISCLAIMER:** This project was coded **99% by AI** (Antigravity). Use this software at your own risk. The authors are not responsible for any data loss, API costs, or unexpected behavior.
@@ -20,7 +20,7 @@ MHAI is a minimalist, beautiful, and powerful Golang-based CLI/TUI tool designed
 
 ### Quick Install (Linux)
 
-You can install MHAI directly using the following command:
+You can install term-ai directly using the following command:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mholtzhausen/term-ai/main/scripts/install.sh | sh
@@ -40,6 +40,26 @@ curl -fsSL https://raw.githubusercontent.com/mholtzhausen/term-ai/main/scripts/i
    make build
    sudo make install
    ```
+
+### Cross-Platform Binaries
+
+Pre-built binaries for Linux (amd64, arm64) and macOS (amd64, arm64) are available on the [GitHub Releases](https://github.com/mholtzhausen/term-ai/releases) page. Download the appropriate binary for your platform and place it in your PATH.
+
+To build all supported binaries locally:
+```bash
+make build-all
+```
+
+### Release Process
+
+1. Tag a new release:
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+2. GitHub Actions will automatically build and upload binaries for linux/amd64, linux/arm64, darwin/amd64, and darwin/arm64 to the release assets.
+
+See `.github/workflows/release.yml` for details.
 
 ## 📖 Usage
 

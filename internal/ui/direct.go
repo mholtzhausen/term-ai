@@ -64,13 +64,13 @@ func (m statusModel) View() string {
 
 	status := fmt.Sprintf("%s %s %s tokens | %s tokens/sec",
 		m.spinner.View(),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#8787AF")).Render("Generating..."),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#AD58B4")).Bold(true).Render(fmt.Sprintf("%d", m.tokens)),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#5F5FD7")).Render(fmt.Sprintf("%.1f", tps)),
+		lipgloss.NewStyle().Foreground(StatusLabelColor).Render("Generating..."),
+		lipgloss.NewStyle().Foreground(StatusTokensColor).Bold(true).Render(fmt.Sprintf("%d", m.tokens)),
+		lipgloss.NewStyle().Foreground(StatusTpsColor).Render(fmt.Sprintf("%.1f", tps)),
 	)
 
 	if m.resuming != "" {
-		status = lipgloss.NewStyle().Foreground(lipgloss.Color("#AD58B4")).Italic(true).Render(m.resuming) + "\n" + status
+		status = lipgloss.NewStyle().Foreground(StatusTokensColor).Italic(true).Render(m.resuming) + "\n" + status
 	}
 	return status
 }

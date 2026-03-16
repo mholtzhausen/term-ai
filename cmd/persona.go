@@ -3,8 +3,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/mhai-org/mhai/internal/db"
-	"github.com/mhai-org/mhai/internal/persona"
+	"github.com/mhai-org/term-ai/internal/db"
+	"github.com/mhai-org/term-ai/internal/persona"
 	"github.com/spf13/cobra"
 )
 
@@ -12,6 +12,8 @@ var personaCmd = &cobra.Command{
 	Use:   "persona",
 	Short: "Manage AI personas",
 }
+
+var personaTools []string
 
 var personaSetCmd = &cobra.Command{
 	Use:   "set [name] [prompt]",
@@ -33,12 +35,20 @@ var personaSetCmd = &cobra.Command{
 			return
 		}
 
-		if err := persona.SetPersona(d, name, prompt); err != nil {
+		if err := persona.SetPersona(d, name, prompt, personaTools); err != nil {
 			fmt.Printf("Error saving persona: %v\n", err)
 			return
 		}
 		fmt.Printf("Persona '%s' saved.\n", name)
 	},
+}
+
+func init() {
+	personaSetCmd.Flags().StringSliceVar(&personaTools, "tools", nil, "Comma-separated list of tool names (e.g. bash,read_file,write_file)")
+	rootCmd.AddCommand(personaCmd)
+	personaCmd.AddCommand(personaSetCmd)
+	personaCmd.AddCommand(personaUnsetCmd)
+	personaCmd.AddCommand(personaListCmd)
 }
 
 var personaUnsetCmd = &cobra.Command{

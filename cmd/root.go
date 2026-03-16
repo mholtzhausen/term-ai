@@ -7,25 +7,36 @@ import (
 
 	"time"
 
-	"github.com/mhai-org/mhai/internal/ai"
-	"github.com/mhai-org/mhai/internal/config"
-	"github.com/mhai-org/mhai/internal/db"
-	"github.com/mhai-org/mhai/internal/persona"
-	"github.com/mhai-org/mhai/internal/ui"
-	"github.com/spf13/cobra"
 	"github.com/charmbracelet/glamour"
+	"github.com/mhai-org/term-ai/internal/ai"
+	"github.com/mhai-org/term-ai/internal/config"
+	"github.com/mhai-org/term-ai/internal/db"
+	"github.com/mhai-org/term-ai/internal/persona"
+	"github.com/mhai-org/term-ai/internal/ui"
+	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
 
 var promptFlag string
 
+// Version is set at build time via -ldflags.
+var Version = "dev"
+
+func warnIfDevVersion() {
+	if Version == "dev" {
+		fmt.Fprintf(os.Stderr, "Warning: Running with default version 'dev'. This build may not correspond to a tagged release.\n")
+	}
+}
+
 var rootCmd = &cobra.Command{
-	Use:   "ai [persona]",
-	Short: "MHAI - minimalist Golang-based CLI tool for AI interaction",
-	Long: `MHAI is a beautiful, interactive CLI tool for interacting with multi-modal AI personas.
+	Use:     "ai [persona]",
+	Version: Version,
+	Short:   "term-ai - minimalist Golang-based CLI tool for AI interaction",
+	Long: `term-ai is a beautiful, interactive CLI tool for interacting with multi-modal AI personas.
 It supports both an interactive TUI mode and a direct output mode.`,
 	Args: cobra.ArbitraryArgs,
 	Run: func(cmd *cobra.Command, args []string) {
+		warnIfDevVersion()
 		personaName := "default"
 		
 		// If prompt flag is empty, try to gather from positional args

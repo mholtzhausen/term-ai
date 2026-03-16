@@ -1,4 +1,4 @@
-module github.com/mhai-org/mhai
+module github.com/mhai-org/term-ai
 
 go 1.25.6
 
