@@ -41,6 +41,26 @@ curl -fsSL https://raw.githubusercontent.com/mholtzhausen/term-ai/main/scripts/i
    sudo make install
    ```
 
+### Cross-Platform Binaries
+
+Pre-built binaries for Linux (amd64, arm64) and macOS (amd64, arm64) are available on the [GitHub Releases](https://github.com/mholtzhausen/term-ai/releases) page. Download the appropriate binary for your platform and place it in your PATH.
+
+To build all supported binaries locally:
+```bash
+make build-all
+```
+
+### Release Process
+
+1. Tag a new release:
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+2. GitHub Actions will automatically build and upload binaries for linux/amd64, linux/arm64, darwin/amd64, and darwin/arm64 to the release assets.
+
+See `.github/workflows/release.yml` for details.
+
 ## 📖 Usage
 
 ### Interactive TUI Mode
