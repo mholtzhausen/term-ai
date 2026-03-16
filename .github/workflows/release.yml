@@ -30,7 +30,7 @@ jobs:
           mkdir -p build/bin
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build \
             -ldflags "-X github.com/mhai-org/term-ai/cmd.Version=${{ github.ref_name }}" \
-            -o build/bin/ai-${{ matrix.goos }}-${{ matrix.goarch }} main.go
+            -o build/bin/ai-${{ matrix.goos }}-${{ matrix.goarch }} .
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:

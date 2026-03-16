@@ -14,19 +14,19 @@ all: build
 build:
 	@echo "Building term-ai $(VERSION)..."
 	@mkdir -p $(BUILD_DIR)
-	@go build $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) main.go
+	@go build $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) .
 	@echo "Build complete: $(BUILD_DIR)/$(BINARY_NAME)"
 
 ## build-all: Build binaries for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64
 build-all:
 	@echo "Building for linux/amd64..."
-	@GOOS=linux GOARCH=amd64 go build $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 main.go
+	@GOOS=linux GOARCH=amd64 go build $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 .
 	@echo "Building for linux/arm64..."
-	@GOOS=linux GOARCH=arm64 go build $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 main.go
+	@GOOS=linux GOARCH=arm64 go build $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 .
 	@echo "Building for darwin/amd64..."
-	@GOOS=darwin GOARCH=amd64 go build $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 main.go
+	@GOOS=darwin GOARCH=amd64 go build $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 .
 	@echo "Building for darwin/arm64..."
-	@GOOS=darwin GOARCH=arm64 go build $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 main.go
+	@GOOS=darwin GOARCH=arm64 go build $(LD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 .
 	@echo "All cross-platform builds complete."
 
 ## clean: Remove build directory
