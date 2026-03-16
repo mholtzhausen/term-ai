@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/charmbracelet/glamour"
+	"github.com/mhai-org/term-ai/internal/agent"
 	"github.com/mhai-org/term-ai/internal/ai"
 	"github.com/mhai-org/term-ai/internal/config"
 	"github.com/mhai-org/term-ai/internal/db"
-	"github.com/mhai-org/term-ai/internal/persona"
 	"github.com/mhai-org/term-ai/internal/ui"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -37,7 +37,7 @@ It supports both an interactive TUI mode and a direct output mode.`,
 	Args: cobra.ArbitraryArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		warnIfDevVersion()
-		personaName := "default"
+		personaName := ""
 		
 		// If prompt flag is empty, try to gather from positional args
 		remainingArgs := args
@@ -64,12 +64,21 @@ It supports both an interactive TUI mode and a direct output mode.`,
 			return
 		}
 
-		p, err := persona.GetPersona(d, personaName)
+		// For TUI mode with no explicit @agent arg, fall back to saved default.
+		if personaName == "" {
+			if saved, err := config.GetConfig(d, "default_tui_agent"); err == nil && saved != "" {
+				personaName = saved
+			} else {
+				personaName = "default"
+			}
+		}
+
+		p, err := agent.GetAgent(d, personaName)
 		if err != nil {
 			if personaName == "default" {
-				p = &persona.Persona{Name: "default", SystemPrompt: "You are a helpful assistant."}
+				p = &agent.Agent{Name: "default", SystemPrompt: "You are a helpful assistant."}
 			} else {
-				fmt.Printf("Persona '%s' not found.\n", personaName)
+				fmt.Printf("Agent '%s' not found.\n", personaName)
 				return
 			}
 		}

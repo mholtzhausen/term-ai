@@ -13,10 +13,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mhai-org/term-ai/internal/agent"
 	"github.com/mhai-org/term-ai/internal/ai"
 	"github.com/mhai-org/term-ai/internal/config"
 	"github.com/mhai-org/term-ai/internal/db"
-	"github.com/mhai-org/term-ai/internal/persona"
 	"github.com/mhai-org/term-ai/internal/tools"
 )
 
@@ -51,7 +51,7 @@ type model struct {
 	program       *tea.Program
 	viewport      viewport.Model
 	textarea      textarea.Model
-	persona       *persona.Persona
+	persona       *agent.Agent
 	provider      *config.Provider
 	history       []ai.Message
 	err           error
@@ -97,7 +97,7 @@ type agentResponseMsg struct {
 	history []ai.Message
 }
 
-func LaunchInteractive(p *persona.Persona, provider *config.Provider, initialModelName string) error {
+func LaunchInteractive(p *agent.Agent, provider *config.Provider, initialModelName string) error {
 	activeTheme := DefaultTheme
 	if d, dbErr := db.Connect(); dbErr == nil {
 		if name, cfgErr := config.GetConfig(d, "active_theme"); cfgErr == nil {
@@ -117,7 +117,7 @@ func LaunchInteractive(p *persona.Persona, provider *config.Provider, initialMod
 	return err
 }
 
-func initialModel(p *persona.Persona, provider *config.Provider, initialModelName string) model {
+func initialModel(p *agent.Agent, provider *config.Provider, initialModelName string) model {
 	ta := textarea.New()
 	ta.Placeholder = "Type your message here..."
 	ta.Focus()
@@ -217,7 +217,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if ok && i.title != "Add New Agent..." {
 						d, _ := db.Connect()
 						if d != nil {
-							persona.UnsetPersona(d, i.title)
+							agent.UnsetAgent(d, i.title)
 							d.Conn.Close()
 						}
 						m.openAgentsPalette()
@@ -228,7 +228,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if ok && i.title != "Add New Agent..." {
 						d, _ := db.Connect()
 						if d != nil {
-							a, err := persona.GetPersona(d, i.title)
+							a, err := agent.GetAgent(d, i.title)
 							d.Conn.Close()
 							if err == nil {
 								m.showPalette = false
@@ -266,6 +266,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlP:
 			m.openMainPalette()
 			return m, nil
+		case tea.KeyCtrlA:
+			return m.openAgentsPalette()
 		case tea.KeyCtrlD:
 			// Advance from multi-line system-prompt step in the agent wizard.
 			if m.showWizard && m.wizardType == "agent" && m.wizardStep == 2 {
@@ -484,8 +486,8 @@ func (m *model) sizeApp() {
 func (m *model) openMainPalette() {
 	items := []list.Item{
 		item{title: "Select Provider", category: "Suggested", shortcut: "ctrl+p"},
-		item{title: "Select Model", category: "Suggested", shortcut: "ctrl+m"},
-		item{title: "Manage Agents", category: "Suggested"},
+		item{title: "Select Model", category: "Suggested"},
+		item{title: "Manage Agents", category: "Suggested", shortcut: "ctrl+a"},
 		item{title: "Change Theme", category: "Appearance"},
 		item{title: "Recent Conversations", category: "Session", shortcut: "ctrl+r"},
 	}
@@ -578,13 +580,13 @@ func (m *model) handlePaletteSelection() (tea.Model, tea.Cmd) {
 		d, _ := db.Connect()
 		if d != nil {
 			defer d.Conn.Close()
-			a, err := persona.GetPersona(d, i.title)
+			a, err := agent.GetAgent(d, i.title)
 			if err == nil {
 				m.persona = a
 				if len(m.history) > 0 {
 					m.history[0] = ai.Message{Role: "system", Content: a.SystemPrompt}
 				}
-				config.SetConfig(d, "active_persona", a.Name)
+				config.SetConfig(d, "default_tui_agent", a.Name)
 				m.history = append(m.history, ai.Message{Role: "system", Content: fmt.Sprintf("Switched to agent: %s", a.Name)})
 			}
 		}
@@ -724,7 +726,7 @@ func (m *model) openAgentsPalette() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	defer d.Conn.Close()
-	agents, _ := persona.ListPersonas(d)
+	agents, _ := agent.ListAgents(d)
 
 	var items []list.Item
 	for _, a := range agents {
@@ -764,7 +766,7 @@ func (m *model) startAgentWizard() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) startEditAgentWizard(a *persona.Persona) (tea.Model, tea.Cmd) {
+func (m *model) startEditAgentWizard(a *agent.Agent) (tea.Model, tea.Cmd) {
 	m.showWizard = true
 	m.wizardType = "agent"
 	m.wizardMode = "edit"
@@ -858,7 +860,7 @@ func (m *model) saveAgentFromPicker() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	defer d.Conn.Close()
-	if err := persona.SetPersona(d, m.wizardName, m.wizardPersonaPrompt, selected); err != nil {
+	if err := agent.SetAgent(d, m.wizardName, m.wizardPersonaPrompt, selected); err != nil {
 		m.err = err
 		return m, nil
 	}
@@ -997,7 +999,7 @@ func (m *model) View() string {
 		lipgloss.JoinVertical(lipgloss.Left,
 			m.textarea.View(),
 			"",
-			infoStyle.Render(" Ctrl+P: Palette | Enter: Send | Esc: Exit"),
+			infoStyle.Render(" Ctrl+P: Palette | Ctrl+A: Agents | Enter: Send | Esc: Exit"),
 		),
 	)
 
