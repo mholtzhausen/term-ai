@@ -6,7 +6,7 @@ INSTALL_PATH=/usr/local/bin/$(BINARY_NAME)
 VERSION=v0.9-alpha
 LD_FLAGS=-ldflags "-X github.com/mhai-org/term-ai/cmd.Version=$(VERSION)"
 
-.PHONY: all build clean install uninstall help
+.PHONY: all build clean install uninstall release help
 
 all: build
 
@@ -46,6 +46,23 @@ uninstall:
 	@echo "Uninstalling term-ai..."
 	@sudo rm -f $(INSTALL_PATH)
 	@echo "Uninstalled."
+
+## release: Tag VERSION and push to GitHub to trigger the CI release build
+release:
+	@if ! git diff --quiet || ! git diff --cached --quiet; then \
+		echo "Error: working tree is dirty. Commit or stash changes before releasing."; \
+		exit 1; \
+	fi
+	@if git rev-parse $(VERSION) >/dev/null 2>&1; then \
+		echo "Error: tag $(VERSION) already exists."; \
+		exit 1; \
+	fi
+	@echo "Tagging $(VERSION)..."
+	@git tag $(VERSION)
+	@echo "Pushing tag to origin..."
+	@git push origin $(VERSION)
+	@echo "Done. GitHub Actions will build and publish the release at:"
+	@echo "  https://github.com/mholtzhausen/term-ai/releases/tag/$(VERSION)"
 
 ## help: Show this help message
 help:
