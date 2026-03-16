@@ -261,7 +261,7 @@ func (r *Runner) execDelegate(argsJSON string) (string, error) {
 	}
 
 	messages := []ai.Message{
-		{Role: "system", Content: sub.SystemPrompt},
+		{Role: "system", Content: BuildSystemPrompt(sub.SystemPrompt)},
 		{Role: "user", Content: args.Task},
 	}
 

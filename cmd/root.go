@@ -119,7 +119,7 @@ It supports both an interactive TUI mode and a direct output mode.`,
 			// instead of plain streaming. Memory is ephemeral per invocation.
 			if len(p.Tools) > 0 {
 				messages := []ai.Message{
-					{Role: "system", Content: p.SystemPrompt},
+					{Role: "system", Content: agent.BuildSystemPrompt(p.SystemPrompt)},
 					{Role: "user", Content: promptFlag},
 				}
 				r := &agent.Runner{
@@ -158,7 +158,7 @@ It supports both an interactive TUI mode and a direct output mode.`,
 					}
 				}
 
-				messages := []ai.Message{{Role: "system", Content: p.SystemPrompt}}
+				messages := []ai.Message{{Role: "system", Content: agent.BuildSystemPrompt(p.SystemPrompt)}}
 				if lastConv != nil && time.Since(lastConv.UpdatedAt) < 5*time.Minute {
 					messages = lastConv.History
 					resumeMsg = fmt.Sprintf("Resuming recent conversation from %s...", lastConv.UpdatedAt.Format("15:04"))
@@ -222,7 +222,7 @@ It supports both an interactive TUI mode and a direct output mode.`,
 				fmt.Print(out)
 			} else {
 				// Non-terminal: just one-off as before
-				err := ai.StreamChat(provider.ApiUrl, provider.ApiKey, modelName, p.SystemPrompt, promptFlag, &fullResponse)
+				err := ai.StreamChat(provider.ApiUrl, provider.ApiKey, modelName, agent.BuildSystemPrompt(p.SystemPrompt), promptFlag, &fullResponse)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				}

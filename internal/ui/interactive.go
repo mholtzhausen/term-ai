@@ -176,7 +176,7 @@ func initialModel(p *agent.Agent, provider *config.Provider, initialModelName st
 		persona:       p,
 		provider:      provider,
 		selectedModel: initialModelName,
-		history:       []ai.Message{{Role: "system", Content: p.SystemPrompt}},
+		history:       []ai.Message{{Role: "system", Content: agent.BuildSystemPrompt(p.SystemPrompt)}},
 		spinner:       sp,
 	}
 	m.palette.list = l
@@ -665,7 +665,7 @@ func (m *model) handlePaletteSelection() (tea.Model, tea.Cmd) {
 			if err == nil {
 				m.persona = a
 				if len(m.history) > 0 {
-					m.history[0] = ai.Message{Role: "system", Content: a.SystemPrompt}
+					m.history[0] = ai.Message{Role: "system", Content: agent.BuildSystemPrompt(a.SystemPrompt)}
 				}
 				config.SetConfig(d, "default_tui_agent", a.Name)
 				m.history = append(m.history, ai.Message{Role: "system", Content: fmt.Sprintf("Switched to agent: %s", a.Name)})
