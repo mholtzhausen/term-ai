@@ -19,10 +19,17 @@ type toolEntry struct {
 	execute func(argsJSON string) (string, error)
 }
 
-var registry = map[string]toolEntry{
-	"bash":       {schema: bashDef(), execute: runBash},
-	"read_file":  {schema: readFileDef(), execute: runReadFile},
-	"write_file": {schema: writeFileDef(), execute: runWriteFile},
+var registry = map[string]toolEntry{}
+
+// register adds a tool to the registry. Called from init() in each tool file.
+func register(name string, schema ai.ToolDefinition, execute func(string) (string, error)) {
+	registry[name] = toolEntry{schema: schema, execute: execute}
+}
+
+func init() {
+	register("bash", bashDef(), runBash)
+	register("read_file", readFileDef(), runReadFile)
+	register("write_file", writeFileDef(), runWriteFile)
 }
 
 // GetSchemas returns OpenAI tool definitions for the named tools.
@@ -134,6 +141,9 @@ func runReadFile(argsJSON string) (string, error) {
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", fmt.Errorf("read_file: invalid args: %w", err)
+	}
+	if isHiddenPath(args.Path) {
+		return "", fmt.Errorf("read_file: access to hidden files and directories is not permitted")
 	}
 	data, err := os.ReadFile(args.Path)
 	if err != nil {

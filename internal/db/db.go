@@ -71,6 +71,11 @@ func (db *Database) InitSchema() error {
 			model_name TEXT,
 			persona_name TEXT
 		);`,
+		`CREATE TABLE IF NOT EXISTS prompt_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			prompt TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
 	}
 
 	for _, q := range queries {

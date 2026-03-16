@@ -83,6 +83,11 @@ type model struct {
 	wizardPersonaPrompt string
 	wizardAgentTools   string // existing tools for edit mode pre-population
 	toolSelected       map[string]bool
+
+	// Prompt history (newest first)
+	promptHistory []string
+	historyIdx    int    // -1 = not browsing history
+	historyDraft  string // saved live input while browsing
 }
 
 type responseMsg string
@@ -111,6 +116,13 @@ func LaunchInteractive(p *agent.Agent, provider *config.Provider, initialModelNa
 
 	m := initialModel(p, provider, initialModelName)
 	m.theme = activeTheme
+	m.historyIdx = -1
+	if d, dbErr := db.Connect(); dbErr == nil {
+		if hist, hErr := loadPromptHistory(d); hErr == nil {
+			m.promptHistory = hist
+		}
+		d.Conn.Close()
+	}
 	p_tea := tea.NewProgram(&m, tea.WithAltScreen())
 	m.program = p_tea
 	_, err := p_tea.Run()
@@ -256,6 +268,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	} else if m.showWizard {
 		m.textarea, tiCmd = m.textarea.Update(msg)
 	} else {
+		// History navigation: intercept Up/Down before passing to textarea.
+		if kmsg, ok := msg.(tea.KeyMsg); ok && !m.loading {
+			if kmsg.Type == tea.KeyUp && m.textarea.Line() == 0 {
+				if m.historyNavigateBack() {
+					return m, nil
+				}
+			} else if kmsg.Type == tea.KeyDown && m.historyIdx >= 0 {
+				m.historyNavigateForward()
+				return m, nil
+			}
+		}
 		m.textarea, tiCmd = m.textarea.Update(msg)
 	}
 	m.viewport, vpCmd = m.viewport.Update(msg)
@@ -297,7 +320,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textarea.Reset()
 			m.loading = true
 			m.currentOut.Reset()
-			
+			m.historyIdx = -1
+			m.historyDraft = ""
+			// Prepend to in-memory list and persist to DB.
+			m.promptHistory = append([]string{input}, m.promptHistory...)
+			if len(m.promptHistory) > promptHistoryLimit {
+				m.promptHistory = m.promptHistory[:promptHistoryLimit]
+			}
+			go func() {
+				if d, err := db.Connect(); err == nil {
+					_ = savePromptHistory(d, input)
+					d.Conn.Close()
+				}
+			}()
+
 			m.updateViewport()
 
 			return m, m.sendQuery(input)
@@ -877,6 +913,38 @@ func (m *model) saveAgentFromPicker() (tea.Model, tea.Cmd) {
 	m.showPalette = false
 	m.updateViewport()
 	return m, nil
+}
+
+// historyNavigateBack moves one step older in prompt history.
+// Returns true if it handled the key (caller should skip textarea update).
+func (m *model) historyNavigateBack() bool {
+	if len(m.promptHistory) == 0 {
+		return false
+	}
+	if m.historyIdx == -1 {
+		// First press: save whatever is currently typed.
+		m.historyDraft = m.textarea.Value()
+		m.historyIdx = 0
+	} else if m.historyIdx < len(m.promptHistory)-1 {
+		m.historyIdx++
+	} else {
+		return false // already at oldest entry
+	}
+	m.textarea.SetValue(m.promptHistory[m.historyIdx])
+	return true
+}
+
+// historyNavigateForward moves one step newer in prompt history.
+func (m *model) historyNavigateForward() {
+	if m.historyIdx <= 0 {
+		// Back to the live draft.
+		m.historyIdx = -1
+		m.textarea.SetValue(m.historyDraft)
+		m.historyDraft = ""
+		return
+	}
+	m.historyIdx--
+	m.textarea.SetValue(m.promptHistory[m.historyIdx])
 }
 
 func (m *model) updateViewport() {

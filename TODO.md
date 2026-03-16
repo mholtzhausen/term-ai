@@ -1,7 +1,3 @@
-- selected agent should be default for the tui, saved in the config db
-
-- add a shortcut (ctrl+m) to open the agent menu in the tui directly and select a new agent
-
 - convert this 'assistant' to a modern agent that can be customized with the personas. it should have a execution loop that can run tools and respond to the user in a conversational way. it should also be able to ask the user for more information if needed, but only in the terminal. 
 
 - add more tools:
