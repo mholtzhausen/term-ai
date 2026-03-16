@@ -48,7 +48,7 @@ uninstall:
 	@echo "Uninstalled."
 
 ## release: Tag VERSION and push to GitHub to trigger the CI release build
-release:
+release: build-all
 	@if ! git diff --quiet || ! git diff --cached --quiet; then \
 		echo "Error: working tree is dirty. Commit or stash changes before releasing."; \
 		exit 1; \
