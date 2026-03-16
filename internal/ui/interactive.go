@@ -745,6 +745,7 @@ func (m *model) openAgentsPalette() (tea.Model, tea.Cmd) {
 	m.palette = newCommandPalette("Agents", items)
 	m.palette.mode = PaletteAgents
 	m.applyPaletteSize()
+	m.showPalette = true
 	m.palette.list.AdditionalFullHelpKeys = func() []key.Binding {
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
