@@ -65,10 +65,13 @@ type chatResponse struct {
 	} `json:"choices"`
 }
 
+type ModelInfo struct {
+	ID            string `json:"id"`
+	ContextLength int    `json:"context_length"`
+}
+
 type ModelList struct {
-	Data []struct {
-		ID string `json:"id"`
-	} `json:"data"`
+	Data []ModelInfo `json:"data"`
 }
 
 func ListModels(apiUrl, apiKey string) ([]string, error) {
@@ -115,6 +118,45 @@ func ListModels(apiUrl, apiKey string) ([]string, error) {
 		models = append(models, m.ID)
 	}
 	return models, nil
+}
+
+// ListModelsWithInfo returns model metadata including context_length (0 if not provided by the API).
+func ListModelsWithInfo(apiUrl, apiKey string) ([]ModelInfo, error) {
+	modelsUrl := strings.Replace(apiUrl, "/chat/completions", "/models", 1)
+	if modelsUrl == apiUrl {
+		if !strings.HasSuffix(modelsUrl, "/models") {
+			modelsUrl = strings.TrimSuffix(modelsUrl, "/") + "/models"
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", modelsUrl, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var list ModelList
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, err
+	}
+	return list.Data, nil
 }
 
 func StreamChat(apiUrl, apiKey, model, systemPrompt, userPrompt string, out io.Writer) error {
@@ -189,6 +231,153 @@ func StreamChatWithHistory(apiUrl, apiKey, model string, messages []Message, out
 	}
 
 	return nil
+}
+
+// streamToolCallDelta accumulates streaming fragments for a single tool call.
+type streamToolCallDelta struct {
+	id   string
+	name string
+	args strings.Builder
+}
+
+// StreamChatWithHistoryAndTools sends a streaming chat request that supports
+// tool definitions. Content tokens are written to out as they arrive.
+// The returned Message has the fully assembled content and any tool calls.
+// finish_reason is "stop" for a final answer or "tool_calls" when the model
+// wants to invoke tools.
+func StreamChatWithHistoryAndTools(apiUrl, apiKey, model string, messages []Message, toolDefs []ToolDefinition, out io.Writer) (Message, string, error) {
+	reqBody := ChatRequest{
+		Model:    model,
+		Messages: messages,
+		Stream:   true,
+		Tools:    toolDefs,
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return Message{}, "", err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiUrl, bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		return Message{}, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return Message{}, "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return Message{}, "", fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	// deltaChunk is the streaming response shape (superset of ChatResponseChunk).
+	type deltaChunk struct {
+		Choices []struct {
+			Delta struct {
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					Index    int    `json:"index"`
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason *string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+
+	var contentBuf strings.Builder
+	finishReason := "stop"
+	toolDeltas := map[int]*streamToolCallDelta{}
+
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return Message{}, "", err
+		}
+		line = strings.TrimSpace(line)
+		if line == "" || line == "data: [DONE]" {
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		var chunk deltaChunk
+		if err := json.Unmarshal([]byte(line[6:]), &chunk); err != nil {
+			continue
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		choice := chunk.Choices[0]
+
+		if choice.FinishReason != nil && *choice.FinishReason != "" {
+			finishReason = *choice.FinishReason
+		}
+
+		// Stream content tokens to caller.
+		if choice.Delta.Content != "" {
+			contentBuf.WriteString(choice.Delta.Content)
+			fmt.Fprint(out, choice.Delta.Content)
+		}
+
+		// Accumulate tool call fragments by index.
+		for _, tc := range choice.Delta.ToolCalls {
+			d, ok := toolDeltas[tc.Index]
+			if !ok {
+				d = &streamToolCallDelta{}
+				toolDeltas[tc.Index] = d
+			}
+			if tc.ID != "" {
+				d.id = tc.ID
+			}
+			if tc.Function.Name != "" {
+				d.name = tc.Function.Name
+			}
+			d.args.WriteString(tc.Function.Arguments)
+		}
+	}
+
+	// Assemble tool calls in index order.
+	var toolCalls []ToolCall
+	for i := 0; i < len(toolDeltas); i++ {
+		d := toolDeltas[i]
+		toolCalls = append(toolCalls, ToolCall{
+			ID:   d.id,
+			Type: "function",
+			Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{Name: d.name, Arguments: d.args.String()},
+		})
+	}
+
+	msg := Message{
+		Role:      "assistant",
+		Content:   contentBuf.String(),
+		ToolCalls: toolCalls,
+	}
+	return msg, finishReason, nil
 }
 
 // ChatOnce sends a non-streaming chat request and returns the assistant Message

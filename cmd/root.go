@@ -167,7 +167,13 @@ It supports both an interactive TUI mode and a direct output mode.`,
 				}
 				messages = append(messages, ai.Message{Role: "user", Content: promptFlag})
 
-				prog, tokenChan, doneChan := ui.RunStatusProgram(resumeMsg)
+				ctxTokens := 0
+				for _, msg := range messages {
+					ctxTokens += len(msg.Content)
+				}
+				ctxTokens /= 4
+
+				prog, tokenChan, doneChan := ui.RunStatusProgram(resumeMsg, ctxTokens)
 
 				go func() {
 					if _, err := prog.Run(); err != nil {

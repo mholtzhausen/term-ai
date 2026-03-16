@@ -53,7 +53,7 @@ func (r *Runner) Run(messages []ai.Message, toolNames []string, out io.Writer) (
 	schemas := r.buildSchemas(toolNames)
 
 	for i := 0; i < maxIterations; i++ {
-		assistantMsg, finishReason, err := ai.ChatOnce(r.ApiUrl, r.ApiKey, r.Model, messages, schemas)
+		assistantMsg, finishReason, err := ai.StreamChatWithHistoryAndTools(r.ApiUrl, r.ApiKey, r.Model, messages, schemas, out)
 		if err != nil {
 			return messages, fmt.Errorf("llm call failed: %w", err)
 		}
@@ -85,11 +85,9 @@ func (r *Runner) Run(messages []ai.Message, toolNames []string, out io.Writer) (
 			continue
 		}
 
-		// finish_reason == "stop" — the model has produced its final answer.
+		// finish_reason == "stop" — the model produced its final answer.
+		// Content was already streamed to `out` during the SSE phase.
 		messages = append(messages, assistantMsg)
-		if _, err := io.WriteString(out, assistantMsg.Content); err != nil {
-			return messages, err
-		}
 		return messages, nil
 	}
 

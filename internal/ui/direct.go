@@ -12,11 +12,12 @@ import (
 )
 
 type statusModel struct {
-	spinner spinner.Model
-	tokens  int
-	start   time.Time
-	done    bool
-	resuming  string
+	spinner       spinner.Model
+	tokens        int
+	contextTokens int
+	start         time.Time
+	done          bool
+	resuming      string
 }
 
 type ResumeMsg string
@@ -62,11 +63,16 @@ func (m statusModel) View() string {
 		tps = float64(m.tokens) / elapsed
 	}
 
-	status := fmt.Sprintf("%s %s %s tokens | %s tokens/sec",
+	ctxInfo := lipgloss.NewStyle().Foreground(StatusTokensColor).Bold(true).Render(fmt.Sprintf("%d", m.contextTokens))
+	ctxLabel := lipgloss.NewStyle().Foreground(StatusLabelColor).Render("ctx:")
+
+	status := fmt.Sprintf("%s %s %s tokens | %s tokens/sec | %s %s",
 		m.spinner.View(),
 		lipgloss.NewStyle().Foreground(StatusLabelColor).Render("Generating..."),
 		lipgloss.NewStyle().Foreground(StatusTokensColor).Bold(true).Render(fmt.Sprintf("%d", m.tokens)),
 		lipgloss.NewStyle().Foreground(StatusTpsColor).Render(fmt.Sprintf("%.1f", tps)),
+		ctxLabel,
+		ctxInfo,
 	)
 
 	if m.resuming != "" {
@@ -75,15 +81,16 @@ func (m statusModel) View() string {
 	return status
 }
 
-func RunStatusProgram(resumeMsg string) (*tea.Program, chan int, chan bool) {
+func RunStatusProgram(resumeMsg string, contextTokens int) (*tea.Program, chan int, chan bool) {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#AD58B4"))
 
 	m := statusModel{
-		spinner:  s,
-		start:    time.Now(),
-		resuming: resumeMsg,
+		spinner:       s,
+		start:         time.Now(),
+		resuming:      resumeMsg,
+		contextTokens: contextTokens,
 	}
 
 	p := tea.NewProgram(m, tea.WithOutput(os.Stderr))

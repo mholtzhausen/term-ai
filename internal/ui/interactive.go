@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -92,12 +93,21 @@ type model struct {
 	promptHistory []string
 	historyIdx    int    // -1 = not browsing history
 	historyDraft  string // saved live input while browsing
+
+	// Streaming status bar
+	spinner     spinner.Model
+	streamChars int
+	streamStart time.Time
+
+	// Context window tracking
+	modelContextLength  int            // context window of the selected model (0 = unknown)
+	modelContextLengths map[string]int // context lengths keyed by model ID
 }
 
 type responseMsg string
 type errMsg error
 type chunkMsg string
-type modelsLoadedMsg []string
+type modelsLoadedMsg []ai.ModelInfo
 
 type toolCallMsg struct{ Name, Args string }
 type toolResultMsg struct{ Name, Result string }
@@ -156,20 +166,25 @@ func initialModel(p *agent.Agent, provider *config.Provider, initialModelName st
 	vp := viewport.New(30, 10)
 	vp.SetContent("Welcome to term-ai. How can I help you today?")
 
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = lipgloss.NewStyle().Foreground(StatusLabelColor)
+
 	m := model{
-		textarea: ta,
-		viewport: vp,
-		persona:  p,
-		provider: provider,
+		textarea:      ta,
+		viewport:      vp,
+		persona:       p,
+		provider:      provider,
 		selectedModel: initialModelName,
-		history:  []ai.Message{{Role: "system", Content: p.SystemPrompt}},
+		history:       []ai.Message{{Role: "system", Content: p.SystemPrompt}},
+		spinner:       sp,
 	}
 	m.palette.list = l
 	return m
 }
 
 func (m *model) Init() tea.Cmd {
-	return textarea.Blink
+	return tea.Batch(textarea.Blink, m.spinner.Tick)
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -323,8 +338,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			m.history = append(m.history, ai.Message{Role: "user", Content: input})
 			m.textarea.Reset()
+			m.textarea.Blur()
 			m.loading = true
 			m.currentOut.Reset()
+			m.streamChars = 0
+			m.streamStart = time.Now()
 			m.historyIdx = -1
 			m.historyDraft = ""
 			// Prepend to in-memory list and persist to DB.
@@ -370,8 +388,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
+	case spinner.TickMsg:
+		var spCmd tea.Cmd
+		m.spinner, spCmd = m.spinner.Update(msg)
+		return m, spCmd
+
 	case chunkMsg:
 		m.currentOut.WriteString(string(msg))
+		m.streamChars += len(string(msg))
 		m.updateViewport()
 		return m, nil
 
@@ -417,12 +441,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.Conn.Close()
 		}
 		m.updateViewport()
-		return m, nil
+		return m, m.textarea.Focus()
 
 	case modelsLoadedMsg:
 		var items []list.Item
-		for _, mName := range msg {
-			items = append(items, item{title: mName, category: "Models", shortcut: "enter"})
+		if m.modelContextLengths == nil {
+			m.modelContextLengths = make(map[string]int)
+		}
+		for _, info := range msg {
+			items = append(items, item{title: info.ID, category: "Models", shortcut: "enter"})
+			if info.ContextLength > 0 {
+				m.modelContextLengths[info.ID] = info.ContextLength
+			}
 		}
 		m.palette = newCommandPalette("Models", items)
 		m.palette.mode = PaletteModels
@@ -459,7 +489,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.updateViewport()
-		return m, nil
+		return m, m.textarea.Focus()
 
 	case tea.WindowSizeMsg:
 		m.terminalWidth = msg.Width
@@ -469,7 +499,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.err = msg
 		m.loading = false
-		return m, nil
+		return m, m.textarea.Focus()
 	}
 
 	return m, tea.Batch(tiCmd, vpCmd)
@@ -493,7 +523,7 @@ func (m *model) sizeApp() {
 	inputHeight := 3
 
 	headerH := 4
-	footerH := inputHeight + 4 // Adjust for footer border + hint text
+	footerH := inputHeight + 5 // Adjust for footer border + status bar + hint text
 
 	m.viewport.Width = m.width
 	m.viewport.Height = m.height - headerH - footerH
@@ -576,6 +606,11 @@ func (m *model) handlePaletteSelection() (tea.Model, tea.Cmd) {
 		return m, nil
 	case PaletteModels:
 		m.selectedModel = i.title
+		if cl, ok := m.modelContextLengths[i.title]; ok {
+			m.modelContextLength = cl
+		} else {
+			m.modelContextLength = 0
+		}
 		m.history = append(m.history, ai.Message{Role: "system", Content: fmt.Sprintf("Switched to model: %s", i.title)})
 		m.showPalette = false
 		
@@ -731,7 +766,7 @@ func (m *model) openModelsPalette() (tea.Model, tea.Cmd) {
 	m.applyPaletteSize()
 
 	return m, func() tea.Msg {
-		models, err := ai.ListModels(m.provider.ApiUrl, m.provider.ApiKey)
+		models, err := ai.ListModelsWithInfo(m.provider.ApiUrl, m.provider.ApiKey)
 		if err != nil {
 			return errMsg(err)
 		}
@@ -1003,6 +1038,7 @@ func (m *model) sendQuery(prompt string) tea.Cmd {
 		var full strings.Builder
 
 		if len(persona.Tools) > 0 {
+			writer := &tuiWriter{program: m.program, full: &full}
 			r := &agent.Runner{
 				ApiUrl: provider.ApiUrl,
 				ApiKey: provider.ApiKey,
@@ -1015,7 +1051,7 @@ func (m *model) sendQuery(prompt string) tea.Cmd {
 					m.program.Send(toolResultMsg{Name: name, Result: result})
 				},
 			}
-			updatedHistory, err := r.Run(history, persona.Tools, &full)
+			updatedHistory, err := r.Run(history, persona.Tools, writer)
 			if err != nil {
 				history = append(history, ai.Message{Role: "system", Content: "[Agent Error] " + err.Error()})
 				return agentResponseMsg{content: full.String(), history: history}
@@ -1040,6 +1076,14 @@ type tuiWriter struct {
 func (w *tuiWriter) Write(p []byte) (n int, err error) {
 	w.program.Send(chunkMsg(string(p)))
 	return w.full.Write(p)
+}
+
+func (m *model) historyTokens() int {
+	total := 0
+	for _, msg := range m.history {
+		total += len(msg.Content)
+	}
+	return total / 4
 }
 
 func (m *model) View() string {
@@ -1069,9 +1113,46 @@ func (m *model) View() string {
 		),
 	)
 
+	var streamStatusBar string
+	ctxTokens := m.historyTokens()
+	ctxInfo := lipgloss.NewStyle().Foreground(StatusTokensColor).Render(fmt.Sprintf("%d", ctxTokens))
+	if m.modelContextLength > 0 {
+		pct := int(float64(ctxTokens) / float64(m.modelContextLength) * 100)
+		ctxInfo = lipgloss.NewStyle().Foreground(StatusTokensColor).Render(
+			fmt.Sprintf("%d / %d (%d%%)", ctxTokens, m.modelContextLength, pct))
+	}
+	ctxLabel := lipgloss.NewStyle().Foreground(StatusLabelColor).Render("ctx:")
+	if m.loading {
+		elapsed := time.Since(m.streamStart).Seconds()
+		approxTokens := m.streamChars / 4
+		tps := 0.0
+		if elapsed > 0.2 {
+			tps = float64(approxTokens) / elapsed
+		}
+		streamStatusBar = fmt.Sprintf("%s %s  %s tokens  %s tok/s  %s %s",
+			m.spinner.View(),
+			lipgloss.NewStyle().Foreground(StatusLabelColor).Render("Streaming..."),
+			lipgloss.NewStyle().Foreground(StatusTokensColor).Bold(true).Render(fmt.Sprintf("~%d", approxTokens)),
+			lipgloss.NewStyle().Foreground(StatusTpsColor).Render(fmt.Sprintf("%.1f", tps)),
+			ctxLabel,
+			ctxInfo,
+		)
+	} else {
+		streamStatusBar = fmt.Sprintf("%s  %s %s",
+			infoStyle.Render(" Ready"),
+			ctxLabel,
+			ctxInfo,
+		)
+	}
+	streamStatusBar = lipgloss.NewStyle().
+		Background(ColorSurface).
+		Width(m.width).
+		Render(streamStatusBar)
+
 	footer := footerStyle.Width(m.width).Render(
 		lipgloss.JoinVertical(lipgloss.Left,
 			m.textarea.View(),
+			streamStatusBar,
 			"",
 			infoStyle.Render(" Ctrl+P: Palette | Ctrl+A: Agents | Enter: Send | Esc: Exit"),
 		),
