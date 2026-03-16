@@ -138,7 +138,7 @@ func LaunchInteractive(p *agent.Agent, provider *config.Provider, initialModelNa
 		}
 		d.Conn.Close()
 	}
-	p_tea := tea.NewProgram(&m, tea.WithAltScreen())
+	p_tea := tea.NewProgram(&m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	m.program = p_tea
 	_, err := p_tea.Run()
 	return err
@@ -288,6 +288,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	} else if m.showWizard {
 		m.textarea, tiCmd = m.textarea.Update(msg)
 	} else {
+		// Mouse wheel events go only to the viewport (response scroll), not the textarea.
+		if mmsg, ok := msg.(tea.MouseMsg); ok && tea.MouseEvent(mmsg).IsWheel() {
+			m.viewport, vpCmd = m.viewport.Update(msg)
+			return m, vpCmd
+		}
 		// History navigation: intercept Up/Down before passing to textarea.
 		if kmsg, ok := msg.(tea.KeyMsg); ok && !m.loading {
 			if kmsg.Type == tea.KeyUp && m.textarea.Line() == 0 {
@@ -1115,13 +1120,14 @@ func (m *model) View() string {
 
 	var streamStatusBar string
 	ctxTokens := m.historyTokens()
-	ctxInfo := lipgloss.NewStyle().Foreground(StatusTokensColor).Render(fmt.Sprintf("%d", ctxTokens))
+	if m.loading {
+		ctxTokens += m.streamChars / 4
+	}
+	ctxInfo := formatTokens(ctxTokens)
 	if m.modelContextLength > 0 {
 		pct := int(float64(ctxTokens) / float64(m.modelContextLength) * 100)
-		ctxInfo = lipgloss.NewStyle().Foreground(StatusTokensColor).Render(
-			fmt.Sprintf("%d / %d (%d%%)", ctxTokens, m.modelContextLength, pct))
+		ctxInfo = fmt.Sprintf("%s / %s (%d%%)", formatTokens(ctxTokens), formatTokens(m.modelContextLength), pct)
 	}
-	ctxLabel := lipgloss.NewStyle().Foreground(StatusLabelColor).Render("ctx:")
 	if m.loading {
 		elapsed := time.Since(m.streamStart).Seconds()
 		approxTokens := m.streamChars / 4
@@ -1129,21 +1135,28 @@ func (m *model) View() string {
 		if elapsed > 0.2 {
 			tps = float64(approxTokens) / elapsed
 		}
-		streamStatusBar = fmt.Sprintf("%s %s  %s tokens  %s tok/s  %s %s",
+		streamStatusBar = fmt.Sprintf("%s %s  %s tokens  %s tok/s",
 			m.spinner.View(),
 			lipgloss.NewStyle().Foreground(StatusLabelColor).Render("Streaming..."),
 			lipgloss.NewStyle().Foreground(StatusTokensColor).Bold(true).Render(fmt.Sprintf("~%d", approxTokens)),
 			lipgloss.NewStyle().Foreground(StatusTpsColor).Render(fmt.Sprintf("%.1f", tps)),
-			ctxLabel,
-			ctxInfo,
 		)
 	} else {
-		streamStatusBar = fmt.Sprintf("%s  %s %s",
-			infoStyle.Render(" Ready"),
-			ctxLabel,
-			ctxInfo,
-		)
+		streamStatusBar = infoStyle.Render(" Ready")
 	}
+	ctxRight := lipgloss.NewStyle().Foreground(StatusLabelColor).Render("ctx: ") +
+		lipgloss.NewStyle().Foreground(StatusTokensColor).Render(ctxInfo)
+	barWidth := m.width - 2 // account for surface padding
+	if barWidth < 0 {
+		barWidth = m.width
+	}
+	leftWidth := lipgloss.Width(streamStatusBar)
+	rightWidth := lipgloss.Width(ctxRight)
+	padding := barWidth - leftWidth - rightWidth
+	if padding < 1 {
+		padding = 1
+	}
+	streamStatusBar = streamStatusBar + strings.Repeat(" ", padding) + ctxRight
 	streamStatusBar = lipgloss.NewStyle().
 		Background(ColorSurface).
 		Width(m.width).
