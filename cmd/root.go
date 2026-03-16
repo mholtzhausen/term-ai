@@ -12,6 +12,7 @@ import (
 	"github.com/mhai-org/term-ai/internal/ai"
 	"github.com/mhai-org/term-ai/internal/config"
 	"github.com/mhai-org/term-ai/internal/db"
+	"github.com/mhai-org/term-ai/internal/memory"
 	"github.com/mhai-org/term-ai/internal/ui"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -113,6 +114,35 @@ It supports both an interactive TUI mode and a direct output mode.`,
 			// Direct Mode
 			var fullResponse strings.Builder
 			isTerminal := term.IsTerminal(int(os.Stdout.Fd()))
+
+			// If the agent has tools configured, use the agentic ReAct loop
+			// instead of plain streaming. Memory is ephemeral per invocation.
+			if len(p.Tools) > 0 {
+				messages := []ai.Message{
+					{Role: "system", Content: p.SystemPrompt},
+					{Role: "user", Content: promptFlag},
+				}
+				r := &agent.Runner{
+					ApiUrl: provider.ApiUrl,
+					ApiKey: provider.ApiKey,
+					Model:  modelName,
+					Memory: memory.New(),
+					OnToolCall: func(name, args string) {
+						fmt.Fprintf(os.Stderr, "🔧 %s %s\n", name, args)
+					},
+				}
+				if _, err := r.Run(messages, p.Tools, &fullResponse); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					return
+				}
+				if isTerminal {
+					out, _ := glamour.Render(fullResponse.String(), "dark")
+					fmt.Print(out)
+				} else {
+					fmt.Print(fullResponse.String())
+				}
+				return
+			}
 
 			if isTerminal {
 				// Resolve the conversation state before starting the UI program,

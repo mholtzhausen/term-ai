@@ -17,6 +17,7 @@ import (
 	"github.com/mhai-org/term-ai/internal/ai"
 	"github.com/mhai-org/term-ai/internal/config"
 	"github.com/mhai-org/term-ai/internal/db"
+	"github.com/mhai-org/term-ai/internal/memory"
 	"github.com/mhai-org/term-ai/internal/tools"
 )
 
@@ -84,6 +85,9 @@ type model struct {
 	wizardAgentTools   string // existing tools for edit mode pre-population
 	toolSelected       map[string]bool
 
+	// In-process session memory shared across all turns and sub-agents.
+	memory *memory.Memory
+
 	// Prompt history (newest first)
 	promptHistory []string
 	historyIdx    int    // -1 = not browsing history
@@ -117,6 +121,7 @@ func LaunchInteractive(p *agent.Agent, provider *config.Provider, initialModelNa
 	m := initialModel(p, provider, initialModelName)
 	m.theme = activeTheme
 	m.historyIdx = -1
+	m.memory = memory.New()
 	if d, dbErr := db.Connect(); dbErr == nil {
 		if hist, hErr := loadPromptHistory(d); hErr == nil {
 			m.promptHistory = hist
@@ -992,27 +997,27 @@ func (m *model) sendQuery(prompt string) tea.Cmd {
 	model := m.selectedModel
 	history := m.history
 	persona := m.persona
+	mem := m.memory
 
 	return func() tea.Msg {
 		var full strings.Builder
 
 		if len(persona.Tools) > 0 {
-			toolDefs := tools.GetSchemas(persona.Tools)
-			onToolCall := func(name, args string) {
-				m.program.Send(toolCallMsg{Name: name, Args: args})
+			r := &agent.Runner{
+				ApiUrl: provider.ApiUrl,
+				ApiKey: provider.ApiKey,
+				Model:  model,
+				Memory: mem,
+				OnToolCall: func(name, args string) {
+					m.program.Send(toolCallMsg{Name: name, Args: args})
+				},
+				OnToolResult: func(name, result string) {
+					m.program.Send(toolResultMsg{Name: name, Result: result})
+				},
 			}
-			executor := func(name, args string) (string, error) {
-				result, err := tools.Execute(name, args)
-				m.program.Send(toolResultMsg{Name: name, Result: result})
-				return result, err
-			}
-			updatedHistory, err := ai.RunAgentWithHistory(
-				provider.ApiUrl, provider.ApiKey, model,
-				history, toolDefs, onToolCall, executor, &full,
-			)
+			updatedHistory, err := r.Run(history, persona.Tools, &full)
 			if err != nil {
-				// Add error as a system message in chat history
-				history = append(history, ai.Message{Role: "system", Content: "[Tool Error] " + err.Error()})
+				history = append(history, ai.Message{Role: "system", Content: "[Agent Error] " + err.Error()})
 				return agentResponseMsg{content: full.String(), history: history}
 			}
 			return agentResponseMsg{content: full.String(), history: updatedHistory}

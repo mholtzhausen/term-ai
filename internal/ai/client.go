@@ -191,9 +191,9 @@ func StreamChatWithHistory(apiUrl, apiKey, model string, messages []Message, out
 	return nil
 }
 
-// chatOnce sends a non-streaming chat request and returns the assistant Message
-// and finish_reason. Used by RunAgentWithHistory for the tool-calling loop.
-func chatOnce(apiUrl, apiKey, model string, messages []Message, tools []ToolDefinition) (Message, string, error) {
+// ChatOnce sends a non-streaming chat request and returns the assistant Message
+// and finish_reason. Used by the agent Runner for the ReAct loop.
+func ChatOnce(apiUrl, apiKey, model string, messages []Message, tools []ToolDefinition) (Message, string, error) {
 	reqBody := ChatRequest{
 		Model:    model,
 		Messages: messages,
@@ -240,57 +240,4 @@ func chatOnce(apiUrl, apiKey, model string, messages []Message, tools []ToolDefi
 	return cr.Choices[0].Message, cr.Choices[0].FinishReason, nil
 }
 
-// RunAgentWithHistory runs an agentic tool-calling loop. It calls the model,
-// executes any requested tools via executor, and repeats until the model
-// produces a final text answer or maxIterations is reached.
-//
-// onToolCall is notified (in the calling goroutine) before each tool
-// execution so the caller can update UI state. executor receives the tool
-// name and its raw JSON arguments and must return the result string.
-//
-// The final assistant text is written to out. The returned []Message slice
-// contains the full updated history including tool-call turns.
-func RunAgentWithHistory(
-	apiUrl, apiKey, model string,
-	messages []Message,
-	tools []ToolDefinition,
-	onToolCall func(name, args string),
-	executor func(name, args string) (string, error),
-	out io.Writer,
-) ([]Message, error) {
-	const maxIterations = 10
-	for i := 0; i < maxIterations; i++ {
-		assistantMsg, finishReason, err := chatOnce(apiUrl, apiKey, model, messages, tools)
-		if err != nil {
-			return messages, err
-		}
 
-		if finishReason == "tool_calls" || len(assistantMsg.ToolCalls) > 0 {
-			messages = append(messages, assistantMsg)
-			for _, tc := range assistantMsg.ToolCalls {
-				if onToolCall != nil {
-					onToolCall(tc.Function.Name, tc.Function.Arguments)
-				}
-				result, execErr := executor(tc.Function.Name, tc.Function.Arguments)
-				if execErr != nil {
-					result = fmt.Sprintf("error: %v", execErr)
-				}
-				messages = append(messages, Message{
-					Role:       "tool",
-					Content:    result,
-					ToolCallID: tc.ID,
-					Name:       tc.Function.Name,
-				})
-			}
-			continue
-		}
-
-		// Final answer.
-		messages = append(messages, assistantMsg)
-		if _, err := io.WriteString(out, assistantMsg.Content); err != nil {
-			return messages, err
-		}
-		return messages, nil
-	}
-	return messages, fmt.Errorf("agent exceeded maximum iterations (%d)", maxIterations)
-}

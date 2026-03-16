@@ -3,7 +3,7 @@
 BINARY_NAME=ai
 BUILD_DIR=build/bin
 INSTALL_PATH=/usr/local/bin/$(BINARY_NAME)
-VERSION=v0.9.2-alpha
+VERSION=v0.9.3-alpha # this must ALWAYS have the 'v' prefix to work with Go's -ldflags version injection
 LD_FLAGS=-ldflags "-X github.com/mhai-org/term-ai/cmd.Version=$(VERSION)"
 
 .PHONY: all build clean install uninstall release help
