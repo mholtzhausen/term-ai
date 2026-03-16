@@ -128,6 +128,8 @@ const (
 	PaletteProviders
 	PaletteConversations
 	PaletteThemes
+	PaletteAgents
+	PaletteToolPicker
 )
 
 type commandPalette struct {

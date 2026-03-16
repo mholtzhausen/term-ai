@@ -17,6 +17,7 @@ import (
 	"github.com/mhai-org/term-ai/internal/config"
 	"github.com/mhai-org/term-ai/internal/db"
 	"github.com/mhai-org/term-ai/internal/persona"
+	"github.com/mhai-org/term-ai/internal/tools"
 )
 
 // Styles
@@ -72,18 +73,29 @@ type model struct {
 	previousTheme Theme
 
 	// Wizard context
-	wizardMode   string // "add" or "edit"
-	showWizard   bool
-	wizardStep   int
-	wizardName   string
-	wizardKey    string
-	wizardUrl    string
+	wizardType         string // "provider" or "agent"
+	wizardMode         string // "add" or "edit"
+	showWizard         bool
+	wizardStep         int
+	wizardName         string
+	wizardKey          string
+	wizardUrl          string
+	wizardPersonaPrompt string
+	wizardAgentTools   string // existing tools for edit mode pre-population
+	toolSelected       map[string]bool
 }
 
 type responseMsg string
 type errMsg error
 type chunkMsg string
 type modelsLoadedMsg []string
+
+type toolCallMsg struct{ Name, Args string }
+type toolResultMsg struct{ Name, Result string }
+type agentResponseMsg struct {
+	content string
+	history []ai.Message
+}
 
 func LaunchInteractive(p *persona.Persona, provider *config.Provider, initialModelName string) error {
 	activeTheme := DefaultTheme
@@ -185,6 +197,49 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if kmsg, ok := msg.(tea.KeyMsg); ok && m.palette.mode == PaletteToolPicker {
+			if m.palette.list.FilterState() != list.Filtering && kmsg.String() == " " {
+				if i, ok := m.palette.list.SelectedItem().(item); ok {
+					if toolName, ok := i.meta["tool"].(string); ok {
+						m.toolSelected[toolName] = !m.toolSelected[toolName]
+						m.refreshToolPickerItems()
+						return m, nil
+					}
+				}
+			}
+		}
+
+		if kmsg, ok := msg.(tea.KeyMsg); ok && m.palette.mode == PaletteAgents {
+			if m.palette.list.FilterState() != list.Filtering {
+				switch kmsg.String() {
+				case "d":
+					i, ok := m.palette.list.SelectedItem().(item)
+					if ok && i.title != "Add New Agent..." {
+						d, _ := db.Connect()
+						if d != nil {
+							persona.UnsetPersona(d, i.title)
+							d.Conn.Close()
+						}
+						m.openAgentsPalette()
+						return m, nil
+					}
+				case "e":
+					i, ok := m.palette.list.SelectedItem().(item)
+					if ok && i.title != "Add New Agent..." {
+						d, _ := db.Connect()
+						if d != nil {
+							a, err := persona.GetPersona(d, i.title)
+							d.Conn.Close()
+							if err == nil {
+								m.showPalette = false
+								return m.startEditAgentWizard(a)
+							}
+						}
+					}
+				}
+			}
+		}
+
 		var lCmd tea.Cmd
 		m.palette.list, lCmd = m.palette.list.Update(msg)
 		tiCmd = lCmd
@@ -211,11 +266,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlP:
 			m.openMainPalette()
 			return m, nil
+		case tea.KeyCtrlD:
+			// Advance from multi-line system-prompt step in the agent wizard.
+			if m.showWizard && m.wizardType == "agent" && m.wizardStep == 2 {
+				return m.handleWizardNext()
+			}
 		case tea.KeyEnter:
 			if m.showPalette {
 				return m.handlePaletteSelection()
 			}
 			if m.showWizard {
+				// For agent step 2 (multi-line system prompt) Enter inserts a
+				// newline; the user presses Ctrl+D to advance instead.
+				if m.wizardType == "agent" && m.wizardStep == 2 {
+					break
+				}
 				return m.handleWizardNext()
 			}
 			if m.loading {
@@ -241,6 +306,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						ApplyTheme(m.previousTheme)
 						m.theme = m.previousTheme
 					}
+					if m.palette.mode == PaletteToolPicker {
+						m.toolSelected = nil
+						m.wizardName = ""
+						m.wizardPersonaPrompt = ""
+					}
 					m.openMainPalette()
 					return m, nil
 				}
@@ -250,6 +320,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.showWizard {
 				m.showWizard = false
 				m.textarea.Reset()
+				m.textarea.KeyMap.InsertNewline.SetEnabled(false)
 				m.textarea.Placeholder = "Type your message here..."
 				return m, nil
 			}
@@ -258,6 +329,50 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chunkMsg:
 		m.currentOut.WriteString(string(msg))
+		m.updateViewport()
+		return m, nil
+
+	case toolCallMsg:
+		m.currentOut.WriteString(fmt.Sprintf("\n🔧 **Calling** `%s`:\n```json\n%s\n```\n", msg.Name, msg.Args))
+		m.updateViewport()
+		return m, nil
+
+	case toolResultMsg:
+		result := msg.Result
+		if len(result) > 500 {
+			result = result[:500] + "\n... (truncated)"
+		}
+		m.currentOut.WriteString(fmt.Sprintf("\n📤 **Result** (`%s`):\n```\n%s\n```\n", msg.Name, result))
+		m.updateViewport()
+		return m, nil
+
+	case agentResponseMsg:
+		m.history = msg.history
+		m.loading = false
+		m.currentOut.Reset()
+		// Save conversation
+		d, _ := db.Connect()
+		if d != nil {
+			if m.currentConversation == nil {
+				title := "TUI Conversation"
+				if len(m.history) > 1 {
+					title = strings.TrimSpace(m.history[1].Content)
+					if len(title) > 30 {
+						title = title[:27] + "..."
+					}
+				}
+				m.currentConversation = &ai.Conversation{
+					Title:        title,
+					Platform:     "tui",
+					ProviderName: m.provider.Name,
+					ModelName:    m.selectedModel,
+					PersonaName:  m.persona.Name,
+				}
+			}
+			m.currentConversation.History = m.history
+			ai.SaveConversation(d, m.currentConversation)
+			d.Conn.Close()
+		}
 		m.updateViewport()
 		return m, nil
 
@@ -347,11 +462,19 @@ func (m *model) sizeApp() {
 	m.modalHeight = int(float64(m.height) * 0.6)
 	if m.showPalette {
 		m.applyPaletteSize()
-		if m.palette.mode == PaletteProviders {
+		switch m.palette.mode {
+		case PaletteProviders, PaletteAgents:
 			m.palette.list.AdditionalShortHelpKeys = func() []key.Binding {
 				return []key.Binding{
 					key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 					key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
+				}
+			}
+		case PaletteToolPicker:
+			m.palette.list.AdditionalShortHelpKeys = func() []key.Binding {
+				return []key.Binding{
+					key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle")),
+					key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "toggle/save")),
 				}
 			}
 		}
@@ -362,6 +485,7 @@ func (m *model) openMainPalette() {
 	items := []list.Item{
 		item{title: "Select Provider", category: "Suggested", shortcut: "ctrl+p"},
 		item{title: "Select Model", category: "Suggested", shortcut: "ctrl+m"},
+		item{title: "Manage Agents", category: "Suggested"},
 		item{title: "Change Theme", category: "Appearance"},
 		item{title: "Recent Conversations", category: "Session", shortcut: "ctrl+r"},
 	}
@@ -384,6 +508,8 @@ func (m *model) handlePaletteSelection() (tea.Model, tea.Cmd) {
 			return m.openModelsPalette()
 		case "Select Provider":
 			return m.openProvidersPalette()
+		case "Manage Agents":
+			return m.openAgentsPalette()
 		case "Change Theme":
 			return m.openThemesPalette()
 		case "Recent Conversations":
@@ -433,6 +559,38 @@ func (m *model) handlePaletteSelection() (tea.Model, tea.Cmd) {
 		}
 		m.showPalette = false
 		return m, nil
+	case PaletteToolPicker:
+		// Enter on an item toggles it; a dedicated "Save" item at the bottom confirms.
+		if toolName, ok := i.meta["tool"].(string); ok {
+			m.toolSelected[toolName] = !m.toolSelected[toolName]
+			m.refreshToolPickerItems()
+			return m, nil
+		}
+		if i.meta["save"] == true {
+			return m.saveAgentFromPicker()
+		}
+		return m, nil
+	case PaletteAgents:
+		if i.title == "Add New Agent..." {
+			m.showPalette = false
+			return m.startAgentWizard()
+		}
+		d, _ := db.Connect()
+		if d != nil {
+			defer d.Conn.Close()
+			a, err := persona.GetPersona(d, i.title)
+			if err == nil {
+				m.persona = a
+				if len(m.history) > 0 {
+					m.history[0] = ai.Message{Role: "system", Content: a.SystemPrompt}
+				}
+				config.SetConfig(d, "active_persona", a.Name)
+				m.history = append(m.history, ai.Message{Role: "system", Content: fmt.Sprintf("Switched to agent: %s", a.Name)})
+			}
+		}
+		m.showPalette = false
+		m.updateViewport()
+		return m, nil
 	case PaletteProviders:
 		if i.title == "Add New Provider..." {
 			m.showPalette = false
@@ -456,6 +614,7 @@ func (m *model) handlePaletteSelection() (tea.Model, tea.Cmd) {
 
 func (m *model) startWizard() (tea.Model, tea.Cmd) {
 	m.showWizard = true
+	m.wizardType = "provider"
 	m.wizardMode = "add"
 	m.wizardStep = 1
 	m.textarea.Reset()
@@ -466,6 +625,7 @@ func (m *model) startWizard() (tea.Model, tea.Cmd) {
 
 func (m *model) startEditWizard(p *config.Provider) (tea.Model, tea.Cmd) {
 	m.showWizard = true
+	m.wizardType = "provider"
 	m.wizardMode = "edit"
 	m.wizardStep = 2 // Skip name in edit mode
 	m.wizardName = p.Name
@@ -477,6 +637,9 @@ func (m *model) startEditWizard(p *config.Provider) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleWizardNext() (tea.Model, tea.Cmd) {
+	if m.wizardType == "agent" {
+		return m.handleAgentWizardNext()
+	}
 	val := strings.TrimSpace(m.textarea.Value())
 	if val == "" {
 		return m, nil
@@ -555,21 +718,187 @@ func (m *model) openProvidersPalette() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *model) openAgentsPalette() (tea.Model, tea.Cmd) {
+	d, _ := db.Connect()
+	if d == nil {
+		return m, nil
+	}
+	defer d.Conn.Close()
+	agents, _ := persona.ListPersonas(d)
+
+	var items []list.Item
+	for _, a := range agents {
+		toolsStr := strings.Join(a.Tools, ", ")
+		if toolsStr == "" {
+			toolsStr = "no tools"
+		}
+		items = append(items, item{
+			title:      a.Name,
+			desc:       toolsStr,
+			category:   "Agents",
+			hasActions: true,
+		})
+	}
+	items = append(items, item{title: "Add New Agent...", category: "Actions"})
+	m.palette = newCommandPalette("Agents", items)
+	m.palette.mode = PaletteAgents
+	m.applyPaletteSize()
+	m.palette.list.AdditionalFullHelpKeys = func() []key.Binding {
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
+			key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
+		}
+	}
+	return m, nil
+}
+
+func (m *model) startAgentWizard() (tea.Model, tea.Cmd) {
+	m.showWizard = true
+	m.wizardType = "agent"
+	m.wizardMode = "add"
+	m.wizardStep = 1
+	m.wizardAgentTools = ""
+	m.textarea.Reset()
+	m.textarea.Placeholder = "Enter agent name (e.g. researcher)..."
+	m.textarea.Focus()
+	return m, nil
+}
+
+func (m *model) startEditAgentWizard(a *persona.Persona) (tea.Model, tea.Cmd) {
+	m.showWizard = true
+	m.wizardType = "agent"
+	m.wizardMode = "edit"
+	m.wizardStep = 2
+	m.wizardName = a.Name
+	m.wizardAgentTools = strings.Join(a.Tools, ", ")
+	m.textarea.Reset()
+	m.textarea.SetValue(a.SystemPrompt)
+	m.textarea.KeyMap.InsertNewline.SetEnabled(true)
+	m.textarea.Placeholder = "Edit system prompt... (Ctrl+D to continue)"
+	m.textarea.Focus()
+	return m, nil
+}
+
+func (m *model) handleAgentWizardNext() (tea.Model, tea.Cmd) {
+	switch m.wizardStep {
+	case 1:
+		val := strings.TrimSpace(m.textarea.Value())
+		if val == "" {
+			return m, nil
+		}
+		m.wizardName = val
+		m.wizardStep = 2
+		m.textarea.Reset()
+		m.textarea.KeyMap.InsertNewline.SetEnabled(true)
+		m.textarea.Placeholder = "Enter system prompt... (Ctrl+D to continue)"
+	case 2:
+		m.wizardPersonaPrompt = m.textarea.Value()
+		m.textarea.Reset()
+		m.textarea.KeyMap.InsertNewline.SetEnabled(false)
+		m.textarea.Placeholder = "Type your message here..."
+		return m.openToolPickerPalette()
+	}
+	return m, nil
+}
+
+func (m *model) openToolPickerPalette() (tea.Model, tea.Cmd) {
+	// Seed checked state from wizardAgentTools (edit mode pre-population).
+	m.toolSelected = make(map[string]bool)
+	for _, t := range tools.ParseTools(m.wizardAgentTools) {
+		m.toolSelected[t] = true
+	}
+	items := m.buildToolPickerItems()
+	m.palette = newCommandPalette("Select Tools", items)
+	m.palette.mode = PaletteToolPicker
+	m.applyPaletteSize()
+	m.showPalette = true
+	m.showWizard = false
+	return m, nil
+}
+
+func (m *model) buildToolPickerItems() []list.Item {
+	var items []list.Item
+	for _, name := range tools.Available() {
+		check := "[ ]"
+		if m.toolSelected[name] {
+			check = "[✓]"
+		}
+		items = append(items, item{
+			title:    fmt.Sprintf("%s %s", check, name),
+			category: "Tools",
+			meta:     map[string]interface{}{"tool": name},
+		})
+	}
+	// Confirm button at the bottom.
+	items = append(items, item{
+		title:    "── Save Agent ──",
+		category: "Actions",
+		meta:     map[string]interface{}{"save": true},
+	})
+	return items
+}
+
+func (m *model) refreshToolPickerItems() {
+	// Preserve the cursor position while rebuilding checked state.
+	cursor := m.palette.list.Index()
+	m.palette.list.SetItems(m.buildToolPickerItems())
+	m.palette.list.Select(cursor)
+}
+
+func (m *model) saveAgentFromPicker() (tea.Model, tea.Cmd) {
+	var selected []string
+	for _, name := range tools.Available() {
+		if m.toolSelected[name] {
+			selected = append(selected, name)
+		}
+	}
+	d, err := db.Connect()
+	if err != nil {
+		m.err = err
+		return m, nil
+	}
+	defer d.Conn.Close()
+	if err := persona.SetPersona(d, m.wizardName, m.wizardPersonaPrompt, selected); err != nil {
+		m.err = err
+		return m, nil
+	}
+	action := "created"
+	if m.wizardMode == "edit" {
+		action = "updated"
+	}
+	m.history = append(m.history, ai.Message{
+		Role:    "system",
+		Content: fmt.Sprintf("Agent %q %s.", m.wizardName, action),
+	})
+	m.toolSelected = nil
+	m.showPalette = false
+	m.updateViewport()
+	return m, nil
+}
+
 func (m *model) updateViewport() {
 	var b strings.Builder
 	for _, msg := range m.history {
-		if msg.Role == "system" {
+		switch msg.Role {
+		case "system":
 			continue
+		case "user":
+			b.WriteString(fmt.Sprintf("**YOU**:\n%s\n\n", msg.Content))
+		case "assistant":
+			if len(msg.ToolCalls) > 0 {
+				for _, tc := range msg.ToolCalls {
+					b.WriteString(fmt.Sprintf("🔧 **Calling** `%s`:\n```json\n%s\n```\n\n", tc.Function.Name, tc.Function.Arguments))
+				}
+			} else {
+				b.WriteString(fmt.Sprintf("**AI**:\n%s\n\n", msg.Content))
+			}
+		case "tool":
+			result := msg.Content
+			if len(result) > 500 {
+				result = result[:500] + "\n... (truncated)"
+			}
+			b.WriteString(fmt.Sprintf("📤 **Result** (`%s`):\n```\n%s\n```\n\n", msg.Name, result))
 		}
-		
-		role := "YOU"
-		if msg.Role == "assistant" {
-			role = "AI"
-		}
-		
-		b.WriteString(fmt.Sprintf("**%s**:\n", role))
-		b.WriteString(msg.Content)
-		b.WriteString("\n\n")
 	}
 
 	if m.currentOut.Len() > 0 {
@@ -587,15 +916,39 @@ func (m *model) updateViewport() {
 }
 
 func (m *model) sendQuery(prompt string) tea.Cmd {
+	// Capture values needed in the goroutine.
+	provider := m.provider
+	model := m.selectedModel
+	history := m.history
+	persona := m.persona
+
 	return func() tea.Msg {
 		var full strings.Builder
-		
-		writer := &tuiWriter{
-			program: m.program,
-			full:    &full,
+
+		if len(persona.Tools) > 0 {
+			toolDefs := tools.GetSchemas(persona.Tools)
+			onToolCall := func(name, args string) {
+				m.program.Send(toolCallMsg{Name: name, Args: args})
+			}
+			executor := func(name, args string) (string, error) {
+				result, err := tools.Execute(name, args)
+				m.program.Send(toolResultMsg{Name: name, Result: result})
+				return result, err
+			}
+			updatedHistory, err := ai.RunAgentWithHistory(
+				provider.ApiUrl, provider.ApiKey, model,
+				history, toolDefs, onToolCall, executor, &full,
+			)
+			if err != nil {
+				// Add error as a system message in chat history
+				history = append(history, ai.Message{Role: "system", Content: "[Tool Error] " + err.Error()})
+				return agentResponseMsg{content: full.String(), history: history}
+			}
+			return agentResponseMsg{content: full.String(), history: updatedHistory}
 		}
 
-		err := ai.StreamChat(m.provider.ApiUrl, m.provider.ApiKey, m.selectedModel, m.persona.SystemPrompt, prompt, writer)
+		writer := &tuiWriter{program: m.program, full: &full}
+		err := ai.StreamChatWithHistory(provider.ApiUrl, provider.ApiKey, model, history, writer)
 		if err != nil {
 			return errMsg(err)
 		}
@@ -628,7 +981,8 @@ func (m *model) View() string {
 	// Right side of header
 	rightHeader := lipgloss.JoinVertical(lipgloss.Right,
 		infoStyle.Render(t.Format("Monday, Jan 02, 2006 | 15:04:05")),
-		infoStyle.Render(fmt.Sprintf("Provider: %s | Model: %s", m.provider.Name, m.selectedModel)),
+		infoStyle.Render(fmt.Sprintf("Agent: %s (%d tools) | Provider: %s | Model: %s",
+			m.persona.Name, len(m.persona.Tools), m.provider.Name, m.selectedModel)),
 	)
 	
 	headerWidth := m.width
@@ -656,9 +1010,15 @@ func (m *model) View() string {
 	)
 
 	if m.showPalette {
-		// Custom header from the image
-		headerLeft := lipgloss.NewStyle().Foreground(ColorText).Bold(true).Render("Commands")
-		headerRight := lipgloss.NewStyle().Foreground(ColorMuted).Render("esc")
+		paletteTitle := "Commands"
+		paletteHint := "esc"
+		if m.palette.mode == PaletteToolPicker {
+			paletteTitle = "Select Tools  (3/3)"
+			paletteHint = "space: toggle  ·  enter: toggle/save  ·  esc: cancel"
+		}
+		// Custom header
+		headerLeft := lipgloss.NewStyle().Foreground(ColorText).Bold(true).Render(paletteTitle)
+		headerRight := lipgloss.NewStyle().Foreground(ColorMuted).Render(paletteHint)
 		header := lipgloss.JoinHorizontal(lipgloss.Top,
 			headerLeft,
 			lipgloss.PlaceHorizontal(m.modalWidth-lipgloss.Width(headerLeft)-lipgloss.Width(headerRight)-4, lipgloss.Right, headerRight),
@@ -681,16 +1041,35 @@ func (m *model) View() string {
 	}
 
 	if m.showWizard {
-		stepTitle := ""
-		switch m.wizardStep {
-		case 1: stepTitle = "1/3: Provider Name"
-		case 2: stepTitle = "2/3: API Key"
-		case 3: stepTitle = "3/3: API URL"
-		}
+		var wizardTitle, stepTitle, hintText string
 
-		wizardTitle := "Add Provider Wizard"
-		if m.wizardMode == "edit" {
-			wizardTitle = "Edit Provider Wizard"
+		if m.wizardType == "agent" {
+			wizardTitle = "Add Agent Wizard"
+			if m.wizardMode == "edit" {
+				wizardTitle = "Edit Agent Wizard"
+			}
+			switch m.wizardStep {
+			case 1:
+				stepTitle = "1/2: Agent Name"
+				hintText = "Press Enter to continue, Esc to cancel"
+			case 2:
+				stepTitle = "2/2: System Prompt"
+				hintText = "Press Ctrl+D to continue, Esc to cancel"
+			}
+		} else {
+			wizardTitle = "Add Provider Wizard"
+			if m.wizardMode == "edit" {
+				wizardTitle = "Edit Provider Wizard"
+			}
+			switch m.wizardStep {
+			case 1:
+				stepTitle = "1/3: Provider Name"
+			case 2:
+				stepTitle = "2/3: API Key"
+			case 3:
+				stepTitle = "3/3: API URL"
+			}
+			hintText = "Press Enter to continue, Esc to cancel"
 		}
 
 		wizard := lipgloss.NewStyle().
@@ -704,9 +1083,9 @@ func (m *model) View() string {
 				"",
 				m.textarea.View(),
 				"",
-				infoStyle.Render("Press Enter to continue, Esc to cancel"),
+				infoStyle.Render(hintText),
 			))
-		
+
 		ui = placeOverlayCenter(ui, wizard, m.terminalWidth, m.terminalHeight)
 	}
 

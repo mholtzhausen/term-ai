@@ -13,6 +13,8 @@ var personaCmd = &cobra.Command{
 	Short: "Manage AI personas",
 }
 
+var personaTools []string
+
 var personaSetCmd = &cobra.Command{
 	Use:   "set [name] [prompt]",
 	Short: "Create or update a persona",
@@ -33,12 +35,20 @@ var personaSetCmd = &cobra.Command{
 			return
 		}
 
-		if err := persona.SetPersona(d, name, prompt); err != nil {
+		if err := persona.SetPersona(d, name, prompt, personaTools); err != nil {
 			fmt.Printf("Error saving persona: %v\n", err)
 			return
 		}
 		fmt.Printf("Persona '%s' saved.\n", name)
 	},
+}
+
+func init() {
+	personaSetCmd.Flags().StringSliceVar(&personaTools, "tools", nil, "Comma-separated list of tool names (e.g. bash,read_file,write_file)")
+	rootCmd.AddCommand(personaCmd)
+	personaCmd.AddCommand(personaSetCmd)
+	personaCmd.AddCommand(personaUnsetCmd)
+	personaCmd.AddCommand(personaListCmd)
 }
 
 var personaUnsetCmd = &cobra.Command{
