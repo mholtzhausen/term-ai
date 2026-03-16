@@ -56,6 +56,43 @@ func dimLine(s string) string {
 	return "\x1b[2m" + s + "\x1b[0m"
 }
 
+// placeOverlayBottomRight composites fg over bg at the bottom-right corner,
+// leaving the rest of the background undimmed. margin controls the gap from
+// the edges (in terminal cells). bgW and bgH are the terminal dimensions.
+func placeOverlayBottomRight(bg, fg string, bgW, bgH int) string {
+	const margin = 2
+
+	bgLines := strings.Split(bg, "\n")
+	fgLines := strings.Split(fg, "\n")
+
+	fgH := len(fgLines)
+	fgW := 0
+	for _, l := range fgLines {
+		if w := lipgloss.Width(l); w > fgW {
+			fgW = w
+		}
+	}
+
+	startY := bgH - fgH - margin
+	startX := bgW - fgW - margin
+	if startX < 0 {
+		startX = 0
+	}
+
+	for i, bgLine := range bgLines {
+		fgIdx := i - startY
+		if fgIdx < 0 || fgIdx >= fgH {
+			continue
+		}
+		fgLine := fgLines[fgIdx]
+		left := ansi.Truncate(bgLine, startX, "")
+		right := ansi.TruncateLeft(bgLine, startX+fgW, "")
+		bgLines[i] = left + fgLine + right
+	}
+
+	return strings.Join(bgLines, "\n")
+}
+
 // placeOverlayCenter composites fg centred over bg, dimming all background
 // content. bgW and bgH are the terminal's visual column and row counts.
 func placeOverlayCenter(bg, fg string, bgW, bgH int) string {

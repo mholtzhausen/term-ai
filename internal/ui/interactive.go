@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -102,6 +103,9 @@ type model struct {
 	// Context window tracking
 	modelContextLength  int            // context window of the selected model (0 = unknown)
 	modelContextLengths map[string]int // context lengths keyed by model ID
+
+	// Toast notification overlay
+	toast Toast
 }
 
 type responseMsg string
@@ -288,10 +292,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	} else if m.showWizard {
 		m.textarea, tiCmd = m.textarea.Update(msg)
 	} else {
-		// Mouse wheel events go only to the viewport (response scroll), not the textarea.
-		if mmsg, ok := msg.(tea.MouseMsg); ok && tea.MouseEvent(mmsg).IsWheel() {
-			m.viewport, vpCmd = m.viewport.Update(msg)
-			return m, vpCmd
+		// Mouse events: close-button hit test first, then scroll.
+		if mmsg, ok := msg.(tea.MouseMsg); ok {
+			if mmsg.Action == tea.MouseActionPress && mmsg.Button == tea.MouseButtonLeft {
+				if m.toast.HandleMouseClick(mmsg.Y, mmsg.X) {
+					return m, nil
+				}
+			}
+			if tea.MouseEvent(mmsg).IsWheel() {
+				m.viewport, vpCmd = m.viewport.Update(msg)
+				return m, vpCmd
+			}
 		}
 		// History navigation: intercept Up/Down before passing to textarea.
 		if kmsg, ok := msg.(tea.KeyMsg); ok && !m.loading {
@@ -309,7 +320,28 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.viewport, vpCmd = m.viewport.Update(msg)
 
 	switch msg := msg.(type) {
+	case toastDismissMsg:
+		m.toast.Update(msg)
+		return m, nil
+
 	case tea.KeyMsg:
+		// Clipboard shortcuts (outside palette/wizard).
+		if !m.showPalette && !m.showWizard {
+			switch msg.String() {
+			case "alt+c":
+				text := m.lastAssistantMessage()
+				if text != "" {
+					_ = clipboard.WriteAll(text)
+					return m, m.toast.Show("Last response copied")
+				}
+			case "alt+C":
+				text := m.conversationText()
+				if text != "" {
+					_ = clipboard.WriteAll(text)
+					return m, m.toast.Show("Full conversation copied")
+				}
+			}
+		}
 		switch msg.Type {
 		case tea.KeyCtrlP:
 			m.openMainPalette()
@@ -1091,6 +1123,46 @@ func (m *model) historyTokens() int {
 	return total / 4
 }
 
+// lastAssistantMessage returns the content of the most recent assistant message,
+// or the current streaming buffer if a response is in progress.
+func (m *model) lastAssistantMessage() string {
+	if m.loading && m.currentOut.Len() > 0 {
+		return m.currentOut.String()
+	}
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if m.history[i].Role == "assistant" && m.history[i].Content != "" {
+			return m.history[i].Content
+		}
+	}
+	return ""
+}
+
+// conversationText builds a plain-text representation of the full conversation
+// (user and assistant turns only, no system messages).
+func (m *model) conversationText() string {
+	var b strings.Builder
+	for _, msg := range m.history {
+		switch msg.Role {
+		case "user":
+			b.WriteString("YOU:\n")
+			b.WriteString(msg.Content)
+			b.WriteString("\n\n")
+		case "assistant":
+			if msg.Content != "" {
+				b.WriteString("AI:\n")
+				b.WriteString(msg.Content)
+				b.WriteString("\n\n")
+			}
+		}
+	}
+	if m.loading && m.currentOut.Len() > 0 {
+		b.WriteString("AI:\n")
+		b.WriteString(m.currentOut.String())
+		b.WriteString("\n\n")
+	}
+	return strings.TrimSpace(b.String())
+}
+
 func (m *model) View() string {
 	if m.terminalWidth == 0 {
 		return "Initializing full-screen TUI..."
@@ -1208,6 +1280,12 @@ func (m *model) View() string {
 
 		// Center the modal over the UI with a dimmed background.
 		ui = placeOverlayCenter(ui, modal, m.terminalWidth, m.terminalHeight)
+	}
+
+	// Toast overlay (bottom-right, non-dimming).
+	if m.toast.IsVisible() {
+		toastStr := m.toast.Render(m.terminalWidth, m.terminalHeight)
+		ui = placeOverlayBottomRight(ui, toastStr, m.terminalWidth, m.terminalHeight)
 	}
 
 	if m.showWizard {
