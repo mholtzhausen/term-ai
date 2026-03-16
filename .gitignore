@@ -16,7 +16,7 @@
 
 # Build directory
 build/
-ai
+/ai
 
 # IDEs
 .vscode/
