@@ -4,19 +4,22 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/term"
 )
 
 type statusModel struct {
-	spinner spinner.Model
-	tokens  int
-	start   time.Time
-	done    bool
-	resuming  string
+	spinner       spinner.Model
+	tokens        int
+	contextTokens int
+	start         time.Time
+	done          bool
+	resuming      string
 }
 
 type ResumeMsg string
@@ -35,6 +38,7 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case TokenMsg:
 		m.tokens += int(msg)
+		m.contextTokens += int(msg)
 		return m, nil
 	case bool:
 		if msg {
@@ -62,12 +66,25 @@ func (m statusModel) View() string {
 		tps = float64(m.tokens) / elapsed
 	}
 
-	status := fmt.Sprintf("%s %s %s tokens | %s tokens/sec",
+	ctxInfo := lipgloss.NewStyle().Foreground(StatusTokensColor).Bold(true).Render(formatTokens(m.contextTokens))
+	ctxRight := lipgloss.NewStyle().Foreground(StatusLabelColor).Render("ctx: ") + ctxInfo
+
+	left := fmt.Sprintf("%s %s %s tokens | %s tokens/sec",
 		m.spinner.View(),
 		lipgloss.NewStyle().Foreground(StatusLabelColor).Render("Generating..."),
 		lipgloss.NewStyle().Foreground(StatusTokensColor).Bold(true).Render(fmt.Sprintf("%d", m.tokens)),
 		lipgloss.NewStyle().Foreground(StatusTpsColor).Render(fmt.Sprintf("%.1f", tps)),
 	)
+
+	termWidth, _, err := term.GetSize(int(os.Stderr.Fd()))
+	if err != nil || termWidth <= 0 {
+		termWidth = 80
+	}
+	pad := termWidth - lipgloss.Width(left) - lipgloss.Width(ctxRight)
+	if pad < 1 {
+		pad = 1
+	}
+	status := left + strings.Repeat(" ", pad) + ctxRight
 
 	if m.resuming != "" {
 		status = lipgloss.NewStyle().Foreground(StatusTokensColor).Italic(true).Render(m.resuming) + "\n" + status
@@ -75,15 +92,16 @@ func (m statusModel) View() string {
 	return status
 }
 
-func RunStatusProgram(resumeMsg string) (*tea.Program, chan int, chan bool) {
+func RunStatusProgram(resumeMsg string, contextTokens int) (*tea.Program, chan int, chan bool) {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#AD58B4"))
 
 	m := statusModel{
-		spinner:  s,
-		start:    time.Now(),
-		resuming: resumeMsg,
+		spinner:       s,
+		start:         time.Now(),
+		resuming:      resumeMsg,
+		contextTokens: contextTokens,
 	}
 
 	p := tea.NewProgram(m, tea.WithOutput(os.Stderr))

@@ -6,17 +6,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mhai-org/term-ai/internal/agent"
 	"github.com/mhai-org/term-ai/internal/ai"
 	"github.com/mhai-org/term-ai/internal/config"
 	"github.com/mhai-org/term-ai/internal/db"
-	"github.com/mhai-org/term-ai/internal/persona"
+	"github.com/mhai-org/term-ai/internal/memory"
 	"github.com/mhai-org/term-ai/internal/tools"
 )
 
@@ -51,7 +54,7 @@ type model struct {
 	program       *tea.Program
 	viewport      viewport.Model
 	textarea      textarea.Model
-	persona       *persona.Persona
+	persona       *agent.Agent
 	provider      *config.Provider
 	history       []ai.Message
 	err           error
@@ -83,12 +86,32 @@ type model struct {
 	wizardPersonaPrompt string
 	wizardAgentTools   string // existing tools for edit mode pre-population
 	toolSelected       map[string]bool
+
+	// In-process session memory shared across all turns and sub-agents.
+	memory *memory.Memory
+
+	// Prompt history (newest first)
+	promptHistory []string
+	historyIdx    int    // -1 = not browsing history
+	historyDraft  string // saved live input while browsing
+
+	// Streaming status bar
+	spinner     spinner.Model
+	streamChars int
+	streamStart time.Time
+
+	// Context window tracking
+	modelContextLength  int            // context window of the selected model (0 = unknown)
+	modelContextLengths map[string]int // context lengths keyed by model ID
+
+	// Toast notification overlay
+	toast Toast
 }
 
 type responseMsg string
 type errMsg error
 type chunkMsg string
-type modelsLoadedMsg []string
+type modelsLoadedMsg []ai.ModelInfo
 
 type toolCallMsg struct{ Name, Args string }
 type toolResultMsg struct{ Name, Result string }
@@ -97,7 +120,7 @@ type agentResponseMsg struct {
 	history []ai.Message
 }
 
-func LaunchInteractive(p *persona.Persona, provider *config.Provider, initialModelName string) error {
+func LaunchInteractive(p *agent.Agent, provider *config.Provider, initialModelName string) error {
 	activeTheme := DefaultTheme
 	if d, dbErr := db.Connect(); dbErr == nil {
 		if name, cfgErr := config.GetConfig(d, "active_theme"); cfgErr == nil {
@@ -111,13 +134,21 @@ func LaunchInteractive(p *persona.Persona, provider *config.Provider, initialMod
 
 	m := initialModel(p, provider, initialModelName)
 	m.theme = activeTheme
-	p_tea := tea.NewProgram(&m, tea.WithAltScreen())
+	m.historyIdx = -1
+	m.memory = memory.New()
+	if d, dbErr := db.Connect(); dbErr == nil {
+		if hist, hErr := loadPromptHistory(d); hErr == nil {
+			m.promptHistory = hist
+		}
+		d.Conn.Close()
+	}
+	p_tea := tea.NewProgram(&m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	m.program = p_tea
 	_, err := p_tea.Run()
 	return err
 }
 
-func initialModel(p *persona.Persona, provider *config.Provider, initialModelName string) model {
+func initialModel(p *agent.Agent, provider *config.Provider, initialModelName string) model {
 	ta := textarea.New()
 	ta.Placeholder = "Type your message here..."
 	ta.Focus()
@@ -139,20 +170,25 @@ func initialModel(p *persona.Persona, provider *config.Provider, initialModelNam
 	vp := viewport.New(30, 10)
 	vp.SetContent("Welcome to term-ai. How can I help you today?")
 
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = lipgloss.NewStyle().Foreground(StatusLabelColor)
+
 	m := model{
-		textarea: ta,
-		viewport: vp,
-		persona:  p,
-		provider: provider,
+		textarea:      ta,
+		viewport:      vp,
+		persona:       p,
+		provider:      provider,
 		selectedModel: initialModelName,
-		history:  []ai.Message{{Role: "system", Content: p.SystemPrompt}},
+		history:       []ai.Message{{Role: "system", Content: agent.BuildSystemPrompt(p.SystemPrompt)}},
+		spinner:       sp,
 	}
 	m.palette.list = l
 	return m
 }
 
 func (m *model) Init() tea.Cmd {
-	return textarea.Blink
+	return tea.Batch(textarea.Blink, m.spinner.Tick)
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -217,7 +253,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if ok && i.title != "Add New Agent..." {
 						d, _ := db.Connect()
 						if d != nil {
-							persona.UnsetPersona(d, i.title)
+							agent.UnsetAgent(d, i.title)
 							d.Conn.Close()
 						}
 						m.openAgentsPalette()
@@ -228,7 +264,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if ok && i.title != "Add New Agent..." {
 						d, _ := db.Connect()
 						if d != nil {
-							a, err := persona.GetPersona(d, i.title)
+							a, err := agent.GetAgent(d, i.title)
 							d.Conn.Close()
 							if err == nil {
 								m.showPalette = false
@@ -256,16 +292,62 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	} else if m.showWizard {
 		m.textarea, tiCmd = m.textarea.Update(msg)
 	} else {
+		// Mouse events: close-button hit test first, then scroll.
+		if mmsg, ok := msg.(tea.MouseMsg); ok {
+			if mmsg.Action == tea.MouseActionPress && mmsg.Button == tea.MouseButtonLeft {
+				if m.toast.HandleMouseClick(mmsg.Y, mmsg.X) {
+					return m, nil
+				}
+			}
+			if tea.MouseEvent(mmsg).IsWheel() {
+				m.viewport, vpCmd = m.viewport.Update(msg)
+				return m, vpCmd
+			}
+		}
+		// History navigation: intercept Up/Down before passing to textarea.
+		if kmsg, ok := msg.(tea.KeyMsg); ok && !m.loading {
+			if kmsg.Type == tea.KeyUp && m.textarea.Line() == 0 {
+				if m.historyNavigateBack() {
+					return m, nil
+				}
+			} else if kmsg.Type == tea.KeyDown && m.historyIdx >= 0 {
+				m.historyNavigateForward()
+				return m, nil
+			}
+		}
 		m.textarea, tiCmd = m.textarea.Update(msg)
 	}
 	m.viewport, vpCmd = m.viewport.Update(msg)
 
 	switch msg := msg.(type) {
+	case toastDismissMsg:
+		m.toast.Update(msg)
+		return m, nil
+
 	case tea.KeyMsg:
+		// Clipboard shortcuts (outside palette/wizard).
+		if !m.showPalette && !m.showWizard {
+			switch msg.String() {
+			case "alt+c":
+				text := m.lastAssistantMessage()
+				if text != "" {
+					_ = clipboard.WriteAll(text)
+					return m, m.toast.Show("Last response copied")
+				}
+			case "alt+C":
+				text := m.conversationText()
+				if text != "" {
+					_ = clipboard.WriteAll(text)
+					return m, m.toast.Show("Full conversation copied")
+				}
+			}
+		}
 		switch msg.Type {
 		case tea.KeyCtrlP:
 			m.openMainPalette()
 			return m, nil
+		case tea.KeyCtrlA:
+			return m.openAgentsPalette()
 		case tea.KeyCtrlD:
 			// Advance from multi-line system-prompt step in the agent wizard.
 			if m.showWizard && m.wizardType == "agent" && m.wizardStep == 2 {
@@ -293,9 +375,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			m.history = append(m.history, ai.Message{Role: "user", Content: input})
 			m.textarea.Reset()
+			m.textarea.Blur()
 			m.loading = true
 			m.currentOut.Reset()
-			
+			m.streamChars = 0
+			m.streamStart = time.Now()
+			m.historyIdx = -1
+			m.historyDraft = ""
+			// Prepend to in-memory list and persist to DB.
+			m.promptHistory = append([]string{input}, m.promptHistory...)
+			if len(m.promptHistory) > promptHistoryLimit {
+				m.promptHistory = m.promptHistory[:promptHistoryLimit]
+			}
+			go func() {
+				if d, err := db.Connect(); err == nil {
+					_ = savePromptHistory(d, input)
+					d.Conn.Close()
+				}
+			}()
+
 			m.updateViewport()
 
 			return m, m.sendQuery(input)
@@ -327,8 +425,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
+	case spinner.TickMsg:
+		var spCmd tea.Cmd
+		m.spinner, spCmd = m.spinner.Update(msg)
+		return m, spCmd
+
 	case chunkMsg:
 		m.currentOut.WriteString(string(msg))
+		m.streamChars += len(string(msg))
 		m.updateViewport()
 		return m, nil
 
@@ -374,12 +478,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.Conn.Close()
 		}
 		m.updateViewport()
-		return m, nil
+		return m, m.textarea.Focus()
 
 	case modelsLoadedMsg:
 		var items []list.Item
-		for _, mName := range msg {
-			items = append(items, item{title: mName, category: "Models", shortcut: "enter"})
+		if m.modelContextLengths == nil {
+			m.modelContextLengths = make(map[string]int)
+		}
+		for _, info := range msg {
+			items = append(items, item{title: info.ID, category: "Models", shortcut: "enter"})
+			if info.ContextLength > 0 {
+				m.modelContextLengths[info.ID] = info.ContextLength
+			}
 		}
 		m.palette = newCommandPalette("Models", items)
 		m.palette.mode = PaletteModels
@@ -416,7 +526,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.updateViewport()
-		return m, nil
+		return m, m.textarea.Focus()
 
 	case tea.WindowSizeMsg:
 		m.terminalWidth = msg.Width
@@ -426,7 +536,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.err = msg
 		m.loading = false
-		return m, nil
+		return m, m.textarea.Focus()
 	}
 
 	return m, tea.Batch(tiCmd, vpCmd)
@@ -450,7 +560,7 @@ func (m *model) sizeApp() {
 	inputHeight := 3
 
 	headerH := 4
-	footerH := inputHeight + 4 // Adjust for footer border + hint text
+	footerH := inputHeight + 5 // Adjust for footer border + status bar + hint text
 
 	m.viewport.Width = m.width
 	m.viewport.Height = m.height - headerH - footerH
@@ -484,8 +594,8 @@ func (m *model) sizeApp() {
 func (m *model) openMainPalette() {
 	items := []list.Item{
 		item{title: "Select Provider", category: "Suggested", shortcut: "ctrl+p"},
-		item{title: "Select Model", category: "Suggested", shortcut: "ctrl+m"},
-		item{title: "Manage Agents", category: "Suggested"},
+		item{title: "Select Model", category: "Suggested"},
+		item{title: "Manage Agents", category: "Suggested", shortcut: "ctrl+a"},
 		item{title: "Change Theme", category: "Appearance"},
 		item{title: "Recent Conversations", category: "Session", shortcut: "ctrl+r"},
 	}
@@ -533,6 +643,11 @@ func (m *model) handlePaletteSelection() (tea.Model, tea.Cmd) {
 		return m, nil
 	case PaletteModels:
 		m.selectedModel = i.title
+		if cl, ok := m.modelContextLengths[i.title]; ok {
+			m.modelContextLength = cl
+		} else {
+			m.modelContextLength = 0
+		}
 		m.history = append(m.history, ai.Message{Role: "system", Content: fmt.Sprintf("Switched to model: %s", i.title)})
 		m.showPalette = false
 		
@@ -578,13 +693,13 @@ func (m *model) handlePaletteSelection() (tea.Model, tea.Cmd) {
 		d, _ := db.Connect()
 		if d != nil {
 			defer d.Conn.Close()
-			a, err := persona.GetPersona(d, i.title)
+			a, err := agent.GetAgent(d, i.title)
 			if err == nil {
 				m.persona = a
 				if len(m.history) > 0 {
-					m.history[0] = ai.Message{Role: "system", Content: a.SystemPrompt}
+					m.history[0] = ai.Message{Role: "system", Content: agent.BuildSystemPrompt(a.SystemPrompt)}
 				}
-				config.SetConfig(d, "active_persona", a.Name)
+				config.SetConfig(d, "default_tui_agent", a.Name)
 				m.history = append(m.history, ai.Message{Role: "system", Content: fmt.Sprintf("Switched to agent: %s", a.Name)})
 			}
 		}
@@ -688,7 +803,7 @@ func (m *model) openModelsPalette() (tea.Model, tea.Cmd) {
 	m.applyPaletteSize()
 
 	return m, func() tea.Msg {
-		models, err := ai.ListModels(m.provider.ApiUrl, m.provider.ApiKey)
+		models, err := ai.ListModelsWithInfo(m.provider.ApiUrl, m.provider.ApiKey)
 		if err != nil {
 			return errMsg(err)
 		}
@@ -724,7 +839,7 @@ func (m *model) openAgentsPalette() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	defer d.Conn.Close()
-	agents, _ := persona.ListPersonas(d)
+	agents, _ := agent.ListAgents(d)
 
 	var items []list.Item
 	for _, a := range agents {
@@ -743,6 +858,7 @@ func (m *model) openAgentsPalette() (tea.Model, tea.Cmd) {
 	m.palette = newCommandPalette("Agents", items)
 	m.palette.mode = PaletteAgents
 	m.applyPaletteSize()
+	m.showPalette = true
 	m.palette.list.AdditionalFullHelpKeys = func() []key.Binding {
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
@@ -764,7 +880,7 @@ func (m *model) startAgentWizard() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) startEditAgentWizard(a *persona.Persona) (tea.Model, tea.Cmd) {
+func (m *model) startEditAgentWizard(a *agent.Agent) (tea.Model, tea.Cmd) {
 	m.showWizard = true
 	m.wizardType = "agent"
 	m.wizardMode = "edit"
@@ -858,7 +974,7 @@ func (m *model) saveAgentFromPicker() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	defer d.Conn.Close()
-	if err := persona.SetPersona(d, m.wizardName, m.wizardPersonaPrompt, selected); err != nil {
+	if err := agent.SetAgent(d, m.wizardName, m.wizardPersonaPrompt, selected); err != nil {
 		m.err = err
 		return m, nil
 	}
@@ -874,6 +990,38 @@ func (m *model) saveAgentFromPicker() (tea.Model, tea.Cmd) {
 	m.showPalette = false
 	m.updateViewport()
 	return m, nil
+}
+
+// historyNavigateBack moves one step older in prompt history.
+// Returns true if it handled the key (caller should skip textarea update).
+func (m *model) historyNavigateBack() bool {
+	if len(m.promptHistory) == 0 {
+		return false
+	}
+	if m.historyIdx == -1 {
+		// First press: save whatever is currently typed.
+		m.historyDraft = m.textarea.Value()
+		m.historyIdx = 0
+	} else if m.historyIdx < len(m.promptHistory)-1 {
+		m.historyIdx++
+	} else {
+		return false // already at oldest entry
+	}
+	m.textarea.SetValue(m.promptHistory[m.historyIdx])
+	return true
+}
+
+// historyNavigateForward moves one step newer in prompt history.
+func (m *model) historyNavigateForward() {
+	if m.historyIdx <= 0 {
+		// Back to the live draft.
+		m.historyIdx = -1
+		m.textarea.SetValue(m.historyDraft)
+		m.historyDraft = ""
+		return
+	}
+	m.historyIdx--
+	m.textarea.SetValue(m.promptHistory[m.historyIdx])
 }
 
 func (m *model) updateViewport() {
@@ -921,27 +1069,28 @@ func (m *model) sendQuery(prompt string) tea.Cmd {
 	model := m.selectedModel
 	history := m.history
 	persona := m.persona
+	mem := m.memory
 
 	return func() tea.Msg {
 		var full strings.Builder
 
 		if len(persona.Tools) > 0 {
-			toolDefs := tools.GetSchemas(persona.Tools)
-			onToolCall := func(name, args string) {
-				m.program.Send(toolCallMsg{Name: name, Args: args})
+			writer := &tuiWriter{program: m.program, full: &full}
+			r := &agent.Runner{
+				ApiUrl: provider.ApiUrl,
+				ApiKey: provider.ApiKey,
+				Model:  model,
+				Memory: mem,
+				OnToolCall: func(name, args string) {
+					m.program.Send(toolCallMsg{Name: name, Args: args})
+				},
+				OnToolResult: func(name, result string) {
+					m.program.Send(toolResultMsg{Name: name, Result: result})
+				},
 			}
-			executor := func(name, args string) (string, error) {
-				result, err := tools.Execute(name, args)
-				m.program.Send(toolResultMsg{Name: name, Result: result})
-				return result, err
-			}
-			updatedHistory, err := ai.RunAgentWithHistory(
-				provider.ApiUrl, provider.ApiKey, model,
-				history, toolDefs, onToolCall, executor, &full,
-			)
+			updatedHistory, err := r.Run(history, persona.Tools, writer)
 			if err != nil {
-				// Add error as a system message in chat history
-				history = append(history, ai.Message{Role: "system", Content: "[Tool Error] " + err.Error()})
+				history = append(history, ai.Message{Role: "system", Content: "[Agent Error] " + err.Error()})
 				return agentResponseMsg{content: full.String(), history: history}
 			}
 			return agentResponseMsg{content: full.String(), history: updatedHistory}
@@ -964,6 +1113,54 @@ type tuiWriter struct {
 func (w *tuiWriter) Write(p []byte) (n int, err error) {
 	w.program.Send(chunkMsg(string(p)))
 	return w.full.Write(p)
+}
+
+func (m *model) historyTokens() int {
+	total := 0
+	for _, msg := range m.history {
+		total += len(msg.Content)
+	}
+	return total / 4
+}
+
+// lastAssistantMessage returns the content of the most recent assistant message,
+// or the current streaming buffer if a response is in progress.
+func (m *model) lastAssistantMessage() string {
+	if m.loading && m.currentOut.Len() > 0 {
+		return m.currentOut.String()
+	}
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if m.history[i].Role == "assistant" && m.history[i].Content != "" {
+			return m.history[i].Content
+		}
+	}
+	return ""
+}
+
+// conversationText builds a plain-text representation of the full conversation
+// (user and assistant turns only, no system messages).
+func (m *model) conversationText() string {
+	var b strings.Builder
+	for _, msg := range m.history {
+		switch msg.Role {
+		case "user":
+			b.WriteString("YOU:\n")
+			b.WriteString(msg.Content)
+			b.WriteString("\n\n")
+		case "assistant":
+			if msg.Content != "" {
+				b.WriteString("AI:\n")
+				b.WriteString(msg.Content)
+				b.WriteString("\n\n")
+			}
+		}
+	}
+	if m.loading && m.currentOut.Len() > 0 {
+		b.WriteString("AI:\n")
+		b.WriteString(m.currentOut.String())
+		b.WriteString("\n\n")
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func (m *model) View() string {
@@ -993,11 +1190,56 @@ func (m *model) View() string {
 		),
 	)
 
+	var streamStatusBar string
+	ctxTokens := m.historyTokens()
+	if m.loading {
+		ctxTokens += m.streamChars / 4
+	}
+	ctxInfo := formatTokens(ctxTokens)
+	if m.modelContextLength > 0 {
+		pct := int(float64(ctxTokens) / float64(m.modelContextLength) * 100)
+		ctxInfo = fmt.Sprintf("%s / %s (%d%%)", formatTokens(ctxTokens), formatTokens(m.modelContextLength), pct)
+	}
+	if m.loading {
+		elapsed := time.Since(m.streamStart).Seconds()
+		approxTokens := m.streamChars / 4
+		tps := 0.0
+		if elapsed > 0.2 {
+			tps = float64(approxTokens) / elapsed
+		}
+		streamStatusBar = fmt.Sprintf("%s %s  %s tokens  %s tok/s",
+			m.spinner.View(),
+			lipgloss.NewStyle().Foreground(StatusLabelColor).Render("Streaming..."),
+			lipgloss.NewStyle().Foreground(StatusTokensColor).Bold(true).Render(fmt.Sprintf("~%d", approxTokens)),
+			lipgloss.NewStyle().Foreground(StatusTpsColor).Render(fmt.Sprintf("%.1f", tps)),
+		)
+	} else {
+		streamStatusBar = infoStyle.Render(" Ready")
+	}
+	ctxRight := lipgloss.NewStyle().Foreground(StatusLabelColor).Render("ctx: ") +
+		lipgloss.NewStyle().Foreground(StatusTokensColor).Render(ctxInfo)
+	barWidth := m.width - 2 // account for surface padding
+	if barWidth < 0 {
+		barWidth = m.width
+	}
+	leftWidth := lipgloss.Width(streamStatusBar)
+	rightWidth := lipgloss.Width(ctxRight)
+	padding := barWidth - leftWidth - rightWidth
+	if padding < 1 {
+		padding = 1
+	}
+	streamStatusBar = streamStatusBar + strings.Repeat(" ", padding) + ctxRight
+	streamStatusBar = lipgloss.NewStyle().
+		Background(ColorSurface).
+		Width(m.width).
+		Render(streamStatusBar)
+
 	footer := footerStyle.Width(m.width).Render(
 		lipgloss.JoinVertical(lipgloss.Left,
 			m.textarea.View(),
+			streamStatusBar,
 			"",
-			infoStyle.Render(" Ctrl+P: Palette | Enter: Send | Esc: Exit"),
+			infoStyle.Render(" Ctrl+P: Palette | Ctrl+A: Agents | Enter: Send | Esc: Exit"),
 		),
 	)
 
@@ -1038,6 +1280,12 @@ func (m *model) View() string {
 
 		// Center the modal over the UI with a dimmed background.
 		ui = placeOverlayCenter(ui, modal, m.terminalWidth, m.terminalHeight)
+	}
+
+	// Toast overlay (bottom-right, non-dimming).
+	if m.toast.IsVisible() {
+		toastStr := m.toast.Render(m.terminalWidth, m.terminalHeight)
+		ui = placeOverlayBottomRight(ui, toastStr, m.terminalWidth, m.terminalHeight)
 	}
 
 	if m.showWizard {

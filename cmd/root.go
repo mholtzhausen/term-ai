@@ -8,10 +8,11 @@ import (
 	"time"
 
 	"github.com/charmbracelet/glamour"
+	"github.com/mhai-org/term-ai/internal/agent"
 	"github.com/mhai-org/term-ai/internal/ai"
 	"github.com/mhai-org/term-ai/internal/config"
 	"github.com/mhai-org/term-ai/internal/db"
-	"github.com/mhai-org/term-ai/internal/persona"
+	"github.com/mhai-org/term-ai/internal/memory"
 	"github.com/mhai-org/term-ai/internal/ui"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -37,7 +38,7 @@ It supports both an interactive TUI mode and a direct output mode.`,
 	Args: cobra.ArbitraryArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		warnIfDevVersion()
-		personaName := "default"
+		personaName := ""
 		
 		// If prompt flag is empty, try to gather from positional args
 		remainingArgs := args
@@ -64,12 +65,21 @@ It supports both an interactive TUI mode and a direct output mode.`,
 			return
 		}
 
-		p, err := persona.GetPersona(d, personaName)
+		// For TUI mode with no explicit @agent arg, fall back to saved default.
+		if personaName == "" {
+			if saved, err := config.GetConfig(d, "default_tui_agent"); err == nil && saved != "" {
+				personaName = saved
+			} else {
+				personaName = "default"
+			}
+		}
+
+		p, err := agent.GetAgent(d, personaName)
 		if err != nil {
 			if personaName == "default" {
-				p = &persona.Persona{Name: "default", SystemPrompt: "You are a helpful assistant."}
+				p = &agent.Agent{Name: "default", SystemPrompt: "You are a helpful assistant."}
 			} else {
-				fmt.Printf("Persona '%s' not found.\n", personaName)
+				fmt.Printf("Agent '%s' not found.\n", personaName)
 				return
 			}
 		}
@@ -105,6 +115,35 @@ It supports both an interactive TUI mode and a direct output mode.`,
 			var fullResponse strings.Builder
 			isTerminal := term.IsTerminal(int(os.Stdout.Fd()))
 
+			// If the agent has tools configured, use the agentic ReAct loop
+			// instead of plain streaming. Memory is ephemeral per invocation.
+			if len(p.Tools) > 0 {
+				messages := []ai.Message{
+					{Role: "system", Content: agent.BuildSystemPrompt(p.SystemPrompt)},
+					{Role: "user", Content: promptFlag},
+				}
+				r := &agent.Runner{
+					ApiUrl: provider.ApiUrl,
+					ApiKey: provider.ApiKey,
+					Model:  modelName,
+					Memory: memory.New(),
+					OnToolCall: func(name, args string) {
+						fmt.Fprintf(os.Stderr, "🔧 %s %s\n", name, args)
+					},
+				}
+				if _, err := r.Run(messages, p.Tools, &fullResponse); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					return
+				}
+				if isTerminal {
+					out, _ := glamour.Render(fullResponse.String(), "dark")
+					fmt.Print(out)
+				} else {
+					fmt.Print(fullResponse.String())
+				}
+				return
+			}
+
 			if isTerminal {
 				// Resolve the conversation state before starting the UI program,
 				// so we can pass the resume message as initial state (avoids deadlock
@@ -119,7 +158,7 @@ It supports both an interactive TUI mode and a direct output mode.`,
 					}
 				}
 
-				messages := []ai.Message{{Role: "system", Content: p.SystemPrompt}}
+				messages := []ai.Message{{Role: "system", Content: agent.BuildSystemPrompt(p.SystemPrompt)}}
 				if lastConv != nil && time.Since(lastConv.UpdatedAt) < 5*time.Minute {
 					messages = lastConv.History
 					resumeMsg = fmt.Sprintf("Resuming recent conversation from %s...", lastConv.UpdatedAt.Format("15:04"))
@@ -128,7 +167,13 @@ It supports both an interactive TUI mode and a direct output mode.`,
 				}
 				messages = append(messages, ai.Message{Role: "user", Content: promptFlag})
 
-				prog, tokenChan, doneChan := ui.RunStatusProgram(resumeMsg)
+				ctxTokens := 0
+				for _, msg := range messages {
+					ctxTokens += len(msg.Content)
+				}
+				ctxTokens /= 4
+
+				prog, tokenChan, doneChan := ui.RunStatusProgram(resumeMsg, ctxTokens)
 
 				go func() {
 					if _, err := prog.Run(); err != nil {
@@ -177,7 +222,7 @@ It supports both an interactive TUI mode and a direct output mode.`,
 				fmt.Print(out)
 			} else {
 				// Non-terminal: just one-off as before
-				err := ai.StreamChat(provider.ApiUrl, provider.ApiKey, modelName, p.SystemPrompt, promptFlag, &fullResponse)
+				err := ai.StreamChat(provider.ApiUrl, provider.ApiKey, modelName, agent.BuildSystemPrompt(p.SystemPrompt), promptFlag, &fullResponse)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				}
